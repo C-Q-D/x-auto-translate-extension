@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>X Auto Translate</title>
+    <style>
+      body {
+        min-width: 260px;
+        margin: 0;
+        padding: 14px;
+        color: #0f1419;
+        font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: 15px;
+      }
+
+      p {
+        margin: 8px 0 0;
+        color: #536471;
+        font-size: 12px;
+      }
+
+      button {
+        width: 100%;
+        margin-top: 10px;
+        padding: 8px 10px;
+        border: 0;
+        border-radius: 6px;
+        background: #0f1419;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      dl {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 6px 12px;
+        margin: 12px 0 0;
+        padding-top: 10px;
+        border-top: 1px solid #eff3f4;
+      }
+
+      dt,
+      dd {
+        margin: 0;
+        font-size: 12px;
+      }
+
+      dt {
+        color: #536471;
+      }
+
+      dd {
+        color: #0f1419;
+        font-variant-numeric: tabular-nums;
+      }
+
+      label {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 0;
+        border-top: 1px solid #eff3f4;
+      }
+
+      label:first-of-type {
+        border-top: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>X Auto Translate</h1>
+    <label>
+      <span>自动展开帖子</span>
+      <input type="checkbox" checked disabled>
+    </label>
+    <label>
+      <span>详情页后台翻译</span>
+      <input type="checkbox" checked disabled>
+    </label>
+    <p>打开 X 网页后，插件会在帖子进入视口附近时处理，并用非激活详情页获取 X 自带译文。</p>
+    <p id="currentPage">当前页：检测中...</p>
+    <button id="probeCurrentPage" type="button">检测当前 X 页面</button>
+    <dl>
+      <dt>已展开</dt>
+      <dd id="expanded">0</dd>
+      <dt>已请求</dt>
+      <dd id="requested">0</dd>
+      <dt>已翻译</dt>
+      <dd id="translated">0</dd>
+      <dt>已跳过</dt>
+      <dd id="skipped">0</dd>
+      <dt>失败</dt>
+      <dd id="failed">0</dd>
+      <dt>最近事件</dt>
+      <dd id="lastEvent">-</dd>
+      <dt>版本</dt>
+      <dd id="version">-</dd>
+      <dt>页面状态</dt>
+      <dd id="pageStatus">-</dd>
+      <dt>帖子/译文</dt>
+      <dd id="pageCounts">-</dd>
+    </dl>
+    <script src="popup.js"></script>
+  </body>
+</html>

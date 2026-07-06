@@ -1,0 +1,16 @@
+{
+  "name": "x-auto-translate-extension",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Chrome extension that expands X posts and triggers built-in translation.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/contentScript.js --bundle --format=iife --outfile=dist/contentScript.js && esbuild src/background.js --bundle --format=iife --outfile=dist/background.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.5",
+    "jsdom": "^26.1.0",
+    "ws": "^8.21.0"
+  }
+}
