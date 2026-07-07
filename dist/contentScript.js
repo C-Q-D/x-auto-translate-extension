@@ -2,7 +2,12 @@
   // src/tweetProcessor.js
   var SHOW_MORE_SELECTOR = 'button[data-testid="tweet-text-show-more-link"]';
   var TWEET_TEXT_SELECTOR = '[data-testid="tweetText"]';
+  var CARD_WRAPPER_SELECTOR = '[data-testid="card.wrapper"]';
+  var LONGFORM_READ_VIEW_SELECTOR = '[data-testid="twitterArticleReadView"]';
+  var LONGFORM_TITLE_SELECTOR = '[data-testid="twitter-article-title"]';
+  var LONGFORM_BODY_SELECTOR = '[data-testid="longformRichTextComponent"]';
   var INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';
+  var LONGFORM_UNSUPPORTED_MESSAGE = "X \u6682\u4E0D\u8FD4\u56DE\u957F\u6587\u8BD1\u6587";
   var TRANSLATE_LABELS = [
     "\u663E\u793A\u7FFB\u8BD1",
     "\u7FFB\u8BD1\u5E16\u5B50",
@@ -67,10 +72,60 @@
       if (parsed.hostname !== "x.com" && parsed.hostname !== "twitter.com") {
         return false;
       }
-      return !/\/[^/]+\/status\/\d+/.test(parsed.pathname);
+      return !/^\/i\/article\/\d+/.test(parsed.pathname);
     } catch {
       return false;
     }
+  }
+  function isInsideExcludedTweetContent(element, tweet) {
+    const excludedContainer = element?.closest?.(`${CARD_WRAPPER_SELECTOR}, [role="link"]`);
+    return Boolean(excludedContainer && excludedContainer !== tweet && tweet?.contains?.(excludedContainer));
+  }
+  function isEmbeddedStatusLink(link, tweet) {
+    if (link?.closest?.('article[data-testid="tweet"]') !== tweet) {
+      return true;
+    }
+    const nestedContainer = link.parentElement?.closest?.(`${CARD_WRAPPER_SELECTOR}, [role="link"]`);
+    if (nestedContainer && tweet.contains(nestedContainer)) {
+      return true;
+    }
+    const cardWrapper = link.closest?.(CARD_WRAPPER_SELECTOR);
+    if (cardWrapper && tweet.contains(cardWrapper)) {
+      return true;
+    }
+    return Boolean(link.matches?.('[role="link"]') && link.querySelector?.(TWEET_TEXT_SELECTOR));
+  }
+  function findPrimaryTweetText(tweet) {
+    return Array.from(tweet?.querySelectorAll?.(TWEET_TEXT_SELECTOR) || []).find((tweetText) => {
+      if (!isVisible(tweetText)) {
+        return false;
+      }
+      if (tweetText.closest('article[data-testid="tweet"]') !== tweet) {
+        return false;
+      }
+      if (isInsideExcludedTweetContent(tweetText, tweet)) {
+        return false;
+      }
+      return Boolean(textOf(tweetText));
+    }) || null;
+  }
+  function findLongformTarget(tweet) {
+    const selectors = [
+      LONGFORM_BODY_SELECTOR,
+      LONGFORM_READ_VIEW_SELECTOR,
+      LONGFORM_TITLE_SELECTOR
+    ];
+    for (const selector of selectors) {
+      for (const target of tweet?.querySelectorAll?.(selector) || []) {
+        if (target.closest?.('article[data-testid="tweet"]') === tweet && !isInsideExcludedTweetContent(target, tweet)) {
+          return target;
+        }
+      }
+    }
+    return null;
+  }
+  function isLongformTweet(tweet) {
+    return Boolean(findLongformTarget(tweet));
   }
   function findShowMoreButton(tweet) {
     return Array.from(tweet?.querySelectorAll?.(SHOW_MORE_SELECTOR) || []).find((button) => {
@@ -80,20 +135,16 @@
       if (button.closest('article[data-testid="tweet"]') !== tweet) {
         return false;
       }
-      return !button.closest('[data-testid="card.wrapper"]');
+      return !isInsideExcludedTweetContent(button, tweet);
     }) || null;
   }
   function extractTweetText(tweet) {
-    const tweetText = tweet?.querySelector?.(TWEET_TEXT_SELECTOR);
+    const tweetText = findPrimaryTweetText(tweet);
     return textOf(tweetText);
   }
   function getTweetMetadata(tweet) {
     const statusLinks = Array.from(tweet?.querySelectorAll?.('a[href*="/status/"]') || []);
-    const topLevelStatusLinks = statusLinks.filter((link) => {
-      const nestedInteractive = link.parentElement?.closest?.('a[href], [role="link"], [data-testid="card.wrapper"]');
-      return !nestedInteractive || nestedInteractive === link;
-    });
-    const candidates = topLevelStatusLinks.length > 0 ? topLevelStatusLinks : statusLinks;
+    const candidates = statusLinks.filter((link) => !isEmbeddedStatusLink(link, tweet));
     const preferredLink = candidates.find((link) => link.querySelector("time")) || candidates[0];
     const statusLink = preferredLink?.getAttribute("href");
     const match = statusLink?.match(STATUS_URL_PATTERN);
@@ -110,14 +161,19 @@
       return null;
     }
     tweet.querySelector("[data-xat-status]")?.remove();
-    for (const staleTranslation of tweet.querySelectorAll("[data-xat-translation]")) {
-      if (!staleTranslation.matches(TWEET_TEXT_SELECTOR)) {
-        staleTranslation.remove();
-      }
-    }
-    const tweetText = tweet.querySelector(TWEET_TEXT_SELECTOR);
+    const tweetText = findPrimaryTweetText(tweet);
     if (!tweetText) {
       return null;
+    }
+    for (const staleTranslation of tweet.querySelectorAll("[data-xat-translation]")) {
+      if (staleTranslation === tweetText) {
+        continue;
+      }
+      if (staleTranslation.matches(TWEET_TEXT_SELECTOR)) {
+        staleTranslation.removeAttribute("data-xat-translation");
+      } else {
+        staleTranslation.remove();
+      }
     }
     if (!tweetText.hasAttribute("data-xat-original-text")) {
       tweetText.setAttribute("data-xat-original-text", extractTweetText(tweet));
@@ -136,7 +192,7 @@
       existing.textContent = message;
       return existing;
     }
-    const tweetText = tweet.querySelector(TWEET_TEXT_SELECTOR);
+    const statusTarget = findPrimaryTweetText(tweet) || findLongformTarget(tweet);
     const status = tweet.ownerDocument.createElement("div");
     status.setAttribute("data-xat-status", "1");
     status.textContent = message;
@@ -144,8 +200,8 @@
     status.style.color = "rgb(83, 100, 113)";
     status.style.fontSize = "13px";
     status.style.lineHeight = "18px";
-    if (tweetText?.parentElement) {
-      tweetText.parentElement.insertBefore(status, tweetText.nextSibling);
+    if (statusTarget?.parentElement) {
+      statusTarget.parentElement.insertBefore(status, statusTarget.nextSibling);
     } else {
       tweet.append(status);
     }
@@ -218,6 +274,14 @@
           onEvent("expanded", getTweetMetadata(tweet));
         }
         await waitForStableText(tweet);
+      }
+      if (config.autoTranslate && isLongformTweet(tweet)) {
+        const metadata = getTweetMetadata(tweet);
+        renderTranslationStatus(tweet, LONGFORM_UNSUPPORTED_MESSAGE);
+        tweet.dataset.xatState = "skipped";
+        tweet.dataset.xatSkippedAt = String(now());
+        onEvent("longform-unsupported", metadata || {});
+        return;
       }
       if (config.autoTranslate && typeof config.requestTranslation === "function") {
         const metadata = getTweetMetadata(tweet);
@@ -407,7 +471,7 @@
       viewportObserver.observe(tweet);
     }, scan = function(root = document) {
       if (!canProcessCurrentPage()) {
-        console.debug("[X Auto Translate] skipping status/detail page");
+        console.debug("[X Auto Translate] skipping unsupported X page");
         return;
       }
       for (const tweet of findTweetArticles(root)) {

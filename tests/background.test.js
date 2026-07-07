@@ -313,3 +313,17 @@ test("background stores content script version in diagnostics", async () => {
   assert.equal(storage.xatStats.extensionVersion, "0.1.0");
   assert.equal(storage.xatStats.lastEvent, "content-script-active");
 });
+
+test("background counts longform unsupported diagnostics as skipped", async () => {
+  const { chrome, storage } = createChromeMock();
+  const controller = createBackgroundController(chrome);
+
+  await controller.recordDiagnostic({
+    event: "longform-unsupported",
+    id: "2071912657133973977",
+  });
+
+  assert.equal(storage.xatStats.skipped, 1);
+  assert.equal(storage.xatStats.lastEvent, "longform-unsupported");
+  assert.equal(storage.xatStats.lastTweetId, "2071912657133973977");
+});

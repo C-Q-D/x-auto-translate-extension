@@ -12,6 +12,7 @@ const STAT_COUNTERS = {
   "translation-rendered": "translated",
   "translation-failed": "failed",
   "translation-skipped": "skipped",
+  "longform-unsupported": "skipped",
   "processing-error": "failed",
   "background-translation-failed": "failed",
   "background-translation-skipped": "skipped",

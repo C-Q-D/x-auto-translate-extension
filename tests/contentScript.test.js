@@ -77,33 +77,57 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test("content script does not observe tweets on X status pages", async () => {
-  const { dom, observed } = setupDom(
+test("content script observes detail-page tweets and dynamically inserted comments", async () => {
+  const { dom, observed, observers, listeners, sentMessages } = setupDom(
     "https://x.com/openai/status/2071647677591466098",
     `
       <main>
         <article data-testid="tweet">
+          <a href="/openai/status/2071647677591466098"><time>1小时前</time></a>
           <div data-testid="tweetText">Detail page tweet</div>
         </article>
       </main>
     `,
   );
+  document.cookie = "ct0=csrf-token";
 
   await loadContentScript();
-  assert.equal(observed.length, 0);
+  assert.equal(observed.length, 1);
+  assert.equal(document.querySelector("article").dataset.xatObserved, "1");
 
   document.querySelector("main").insertAdjacentHTML(
     "beforeend",
     `
       <article data-testid="tweet">
-        <div data-testid="tweetText">Hydrated detail tweet</div>
+        <a href="/reply/status/3333333333333333333"><time>刚刚</time></a>
+        <div data-testid="tweetText">Hydrated detail comment</div>
       </article>
     `,
   );
   await flushMutations();
 
-  assert.equal(observed.length, 0);
-  assert.equal(document.querySelectorAll("[data-xat-observed='1']").length, 0);
+  assert.equal(observed.length, 2);
+  assert.equal(document.querySelectorAll("[data-xat-observed='1']").length, 2);
+
+  let response;
+  listeners[0]({ type: "XAT_CONTENT_STATUS" }, null, (value) => {
+    response = value;
+  });
+  assert.equal(response.canProcess, true);
+  assert.equal(response.articleCount, 2);
+  assert.equal(response.observedCount, 2);
+
+  observers[0].callback([{ isIntersecting: true, target: observed[1] }]);
+  await flushMutations();
+  await wait(650);
+
+  const translationRequest = sentMessages.find((entry) => entry.type === "XAT_TRANSLATE_TWEET");
+  assert.deepEqual(translationRequest.payload, {
+    id: "3333333333333333333",
+    url: "https://x.com/reply/status/3333333333333333333",
+    csrfToken: "csrf-token",
+    dstLang: "zh",
+  });
   dom.window.close();
 });
 

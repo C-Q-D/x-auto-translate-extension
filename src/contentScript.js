@@ -143,7 +143,7 @@ if (globalThis.__xatContentScriptLoaded) {
 
   function scan(root = document) {
     if (!canProcessCurrentPage()) {
-      console.debug("[X Auto Translate] skipping status/detail page");
+      console.debug("[X Auto Translate] skipping unsupported X page");
       return;
     }
 

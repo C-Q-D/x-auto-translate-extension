@@ -60,6 +60,21 @@ test("does not use quoted card show-more buttons for the main tweet", () => {
   assert.equal(findShowMoreButton(tweet)?.getAttribute("data-target"), "main");
 });
 
+test("does not use role-link quoted card show-more buttons for the main tweet", () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <div role="link">
+        <button data-testid="tweet-text-show-more-link" data-target="quoted"><span>显示更多</span></button>
+      </div>
+      <div data-testid="tweetText">Main folded text</div>
+      <button data-testid="tweet-text-show-more-link" data-target="main"><span>显示更多</span></button>
+    </article>
+  `);
+
+  const tweet = document.querySelector("article");
+  assert.equal(findShowMoreButton(tweet)?.getAttribute("data-target"), "main");
+});
+
 test("extracts full tweet text from data-testid tweetText after expansion", () => {
   setupDom(`
     <article data-testid="tweet">
@@ -72,6 +87,23 @@ test("extracts full tweet text from data-testid tweetText after expansion", () =
 
   const tweet = document.querySelector("article");
   assert.equal(extractTweetText(tweet), "Hello world");
+});
+
+test("extracts only the primary tweet text and ignores quoted cards", () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <div role="link">
+        <div data-testid="tweetText">Quoted card text</div>
+      </div>
+      <div data-testid="card.wrapper">
+        <div data-testid="tweetText">Quoted media card text</div>
+      </div>
+      <div data-testid="tweetText">Main detail comment text</div>
+    </article>
+  `);
+
+  const tweet = document.querySelector("article");
+  assert.equal(extractTweetText(tweet), "Main detail comment text");
 });
 
 test("normalizes CJK spacing introduced by nested tweet text nodes", () => {
@@ -224,6 +256,25 @@ test("ignores quoted tweet timestamp links when selecting metadata", () => {
   });
 });
 
+test("ignores role-link quoted card status anchors when selecting metadata", () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a role="link" href="/quoted/status/1111111111111111111">
+        <time>昨天</time>
+        <div data-testid="tweetText">Quoted tweet text</div>
+      </a>
+      <a href="/openai/status/2071647677591466098"><time>2小时</time></a>
+      <div data-testid="tweetText">Main tweet</div>
+    </article>
+  `);
+
+  const tweet = document.querySelector("article");
+  assert.deepEqual(getTweetMetadata(tweet), {
+    id: "2071647677591466098",
+    url: "https://x.com/openai/status/2071647677591466098",
+  });
+});
+
 test("replaces tweet text with a returned translation once", () => {
   setupDom(`
     <article data-testid="tweet">
@@ -243,6 +294,25 @@ test("replaces tweet text with a returned translation once", () => {
   assert.equal(tweet.querySelector("[data-xat-translation-text]"), null);
 });
 
+test("replaces only the primary tweet text when quoted text is present", () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <div role="link">
+        <div data-testid="tweetText">Quoted card text</div>
+      </div>
+      <div data-testid="tweetText">Main tweet text</div>
+    </article>
+  `);
+
+  const tweet = document.querySelector("article");
+  const replaced = replaceTweetTextWithTranslation(tweet, "主帖译文");
+
+  assert.equal(replaced.textContent, "主帖译文");
+  assert.equal(tweet.querySelector("[role='link'] [data-testid='tweetText']").textContent, "Quoted card text");
+  assert.equal(tweet.querySelector("[data-xat-translation]").textContent, "主帖译文");
+  assert.equal(tweet.querySelectorAll("[data-xat-translation]").length, 1);
+});
+
 test("renders and replaces translation status messages", () => {
   setupDom(`
     <article data-testid="tweet">
@@ -257,6 +327,24 @@ test("renders and replaces translation status messages", () => {
   const statuses = tweet.querySelectorAll("[data-xat-status]");
   assert.equal(statuses.length, 1);
   assert.equal(statuses[0].textContent, "X 暂时没有返回译文");
+});
+
+test("renders translation status after primary tweet text when quoted text appears first", () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <div role="link">
+        <div data-testid="tweetText">Quoted card text</div>
+      </div>
+      <div data-testid="tweetText">Main tweet text</div>
+    </article>
+  `);
+
+  const tweet = document.querySelector("article");
+  const status = renderTranslationStatus(tweet, "正在获取 X 自带译文...");
+
+  assert.equal(status.parentElement, tweet.querySelectorAll("[data-testid='tweetText']")[1].parentElement);
+  assert.equal(status.previousElementSibling.textContent, "Main tweet text");
+  assert.equal(tweet.querySelector("[role='link'] [data-xat-status]"), null);
 });
 
 test("processor requests direct API translation after expansion and replaces tweet text", async () => {
@@ -297,6 +385,173 @@ test("processor requests direct API translation after expansion and replaces twe
   assert.equal(tweet.querySelector("[data-testid='tweetText']").getAttribute("data-xat-translation"), "1");
   assert.equal(tweet.querySelector("[data-xat-translation-text]"), null);
   assert.equal(tweet.querySelector("[data-xat-status]"), null);
+});
+
+test("processor translates detail-page comment articles using their own metadata", async () => {
+  setupDom(`
+    <main aria-label="时间线：对话">
+      <article data-testid="tweet">
+        <a href="/author/status/1111111111111111111"><time>1小时前</time></a>
+        <div data-testid="tweetText">Main post</div>
+      </article>
+      <article data-testid="tweet">
+        <div role="link">
+          <a href="/quoted/status/2222222222222222222"><time>昨天</time></a>
+          <div data-testid="tweetText">Quoted comment card</div>
+        </div>
+        <a href="/reply/status/3333333333333333333"><time>刚刚</time></a>
+        <div data-testid="tweetText">Visible reply text</div>
+      </article>
+    </main>
+  `);
+  const comment = document.querySelectorAll("article")[1];
+  const requests = [];
+
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => 1000,
+    requestTranslation: async (metadata) => {
+      requests.push(metadata);
+      return { translation: "可见回复译文" };
+    },
+  });
+
+  await processor.processTweet(comment);
+
+  assert.deepEqual(requests, [
+    {
+      id: "3333333333333333333",
+      url: "https://x.com/reply/status/3333333333333333333",
+    },
+  ]);
+  assert.equal(comment.querySelector("[data-xat-translation]").textContent, "可见回复译文");
+  assert.equal(comment.querySelector("[role='link'] [data-testid='tweetText']").textContent, "Quoted comment card");
+});
+
+test("processor marks X Article longform as unsupported without requesting translation", async () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title">Longform title</div>
+        <div data-testid="longformRichTextComponent">
+          <p>Longform body paragraph</p>
+        </div>
+      </div>
+    </article>
+  `);
+  const tweet = document.querySelector("article");
+  const events = [];
+  const requests = [];
+
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => 1000,
+    onEvent: (event, payload) => events.push([event, payload]),
+    requestTranslation: async (metadata) => {
+      requests.push(metadata);
+      return { translation: "不应该出现的译文" };
+    },
+  });
+
+  await processor.processTweet(tweet);
+
+  assert.deepEqual(requests, []);
+  assert.equal(tweet.dataset.xatState, "skipped");
+  assert.equal(tweet.dataset.xatSkippedAt, "1000");
+  assert.equal(tweet.querySelector("[data-xat-status]").textContent, "X 暂不返回长文译文");
+  assert.deepEqual(events, [
+    [
+      "longform-unsupported",
+      {
+        id: "2071912657133973977",
+        url: "https://x.com/writer/status/2071912657133973977",
+      },
+    ],
+  ]);
+});
+
+test("processor still detects primary longform when a quoted longform appears first", async () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
+      <div role="link">
+        <div data-testid="twitterArticleReadView">
+          <div data-testid="twitter-article-title">Quoted longform title</div>
+          <div data-testid="longformRichTextComponent">
+            <p>Quoted longform body paragraph</p>
+          </div>
+        </div>
+      </div>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title">Primary longform title</div>
+        <div data-testid="longformRichTextComponent">
+          <p>Primary longform body paragraph</p>
+        </div>
+      </div>
+    </article>
+  `);
+  const tweet = document.querySelector("article");
+  const requests = [];
+
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => 1000,
+    requestTranslation: async (metadata) => {
+      requests.push(metadata);
+      return { translation: "不应该请求的译文" };
+    },
+  });
+
+  await processor.processTweet(tweet);
+
+  assert.deepEqual(requests, []);
+  assert.equal(tweet.dataset.xatState, "skipped");
+  assert.equal(tweet.querySelector("[data-xat-status]").textContent, "X 暂不返回长文译文");
+});
+
+test("processor translates a normal tweet when it quotes an X Article card", async () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a href="/openai/status/2071647677591466098"><time>2小时</time></a>
+      <div data-testid="tweetText">Normal tweet with quoted article</div>
+      <div role="link">
+        <a href="/writer/status/2071912657133973977"><time>昨天</time></a>
+        <div data-testid="twitterArticleReadView">
+          <div data-testid="twitter-article-title">Quoted longform title</div>
+          <div data-testid="longformRichTextComponent">
+            <p>Quoted longform body paragraph</p>
+          </div>
+        </div>
+      </div>
+    </article>
+  `);
+  const tweet = document.querySelector("article");
+  const requests = [];
+  const events = [];
+
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => 1000,
+    onEvent: (event, payload) => events.push([event, payload]),
+    requestTranslation: async (metadata) => {
+      requests.push(metadata);
+      return { translation: "带引用长文卡片的普通帖译文" };
+    },
+  });
+
+  await processor.processTweet(tweet);
+
+  assert.deepEqual(requests, [
+    {
+      id: "2071647677591466098",
+      url: "https://x.com/openai/status/2071647677591466098",
+    },
+  ]);
+  assert.equal(tweet.dataset.xatState, "translated");
+  assert.equal(tweet.querySelector("[data-xat-translation]").textContent, "带引用长文卡片的普通帖译文");
+  assert.equal(tweet.querySelector("[data-xat-status]"), null);
+  assert.deepEqual(events.map(([event]) => event), ["translation-requested", "translation-rendered"]);
 });
 
 test("processor retries the current tweet after X reuses the article", async () => {
@@ -376,9 +631,11 @@ test("processor silently skips tweets when X has no translation control", async 
   assert.deepEqual(events.map(([event]) => event), ["translation-requested"]);
 });
 
-test("skips X status detail pages to avoid recursive background translation tabs", () => {
-  assert.equal(shouldProcessTimelinePage("https://x.com/openai/status/2071647677591466098"), false);
-  assert.equal(shouldProcessTimelinePage("https://twitter.com/openai/status/2071647677591466098"), false);
+test("allows X status detail pages while rejecting unsupported hosts and direct article pages", () => {
+  assert.equal(shouldProcessTimelinePage("https://x.com/openai/status/2071647677591466098"), true);
+  assert.equal(shouldProcessTimelinePage("https://twitter.com/openai/status/2071647677591466098"), true);
   assert.equal(shouldProcessTimelinePage("https://x.com/home"), true);
   assert.equal(shouldProcessTimelinePage("https://x.com/search?q=codex"), true);
+  assert.equal(shouldProcessTimelinePage("https://x.com/i/article/2071912379319787520"), false);
+  assert.equal(shouldProcessTimelinePage("https://example.com/openai/status/2071647677591466098"), false);
 });

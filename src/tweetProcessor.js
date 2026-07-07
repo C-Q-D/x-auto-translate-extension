@@ -1,6 +1,11 @@
 const SHOW_MORE_SELECTOR = 'button[data-testid="tweet-text-show-more-link"]';
 const TWEET_TEXT_SELECTOR = '[data-testid="tweetText"]';
+const CARD_WRAPPER_SELECTOR = '[data-testid="card.wrapper"]';
+const LONGFORM_READ_VIEW_SELECTOR = '[data-testid="twitterArticleReadView"]';
+const LONGFORM_TITLE_SELECTOR = '[data-testid="twitter-article-title"]';
+const LONGFORM_BODY_SELECTOR = '[data-testid="longformRichTextComponent"]';
 const INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';
+const LONGFORM_UNSUPPORTED_MESSAGE = "X 暂不返回长文译文";
 
 const TRANSLATE_LABELS = [
   "显示翻译",
@@ -83,10 +88,74 @@ export function shouldProcessTimelinePage(url) {
     if (parsed.hostname !== "x.com" && parsed.hostname !== "twitter.com") {
       return false;
     }
-    return !/\/[^/]+\/status\/\d+/.test(parsed.pathname);
+    return !/^\/i\/article\/\d+/.test(parsed.pathname);
   } catch {
     return false;
   }
+}
+
+function isInsideExcludedTweetContent(element, tweet) {
+  const excludedContainer = element?.closest?.(`${CARD_WRAPPER_SELECTOR}, [role="link"]`);
+  return Boolean(excludedContainer && excludedContainer !== tweet && tweet?.contains?.(excludedContainer));
+}
+
+function isEmbeddedStatusLink(link, tweet) {
+  if (link?.closest?.('article[data-testid="tweet"]') !== tweet) {
+    return true;
+  }
+
+  const nestedContainer = link.parentElement?.closest?.(`${CARD_WRAPPER_SELECTOR}, [role="link"]`);
+  if (nestedContainer && tweet.contains(nestedContainer)) {
+    return true;
+  }
+
+  const cardWrapper = link.closest?.(CARD_WRAPPER_SELECTOR);
+  if (cardWrapper && tweet.contains(cardWrapper)) {
+    return true;
+  }
+
+  return Boolean(link.matches?.('[role="link"]') && link.querySelector?.(TWEET_TEXT_SELECTOR));
+}
+
+export function findPrimaryTweetText(tweet) {
+  return Array.from(tweet?.querySelectorAll?.(TWEET_TEXT_SELECTOR) || [])
+    .find((tweetText) => {
+      if (!isVisible(tweetText)) {
+        return false;
+      }
+      if (tweetText.closest('article[data-testid="tweet"]') !== tweet) {
+        return false;
+      }
+      if (isInsideExcludedTweetContent(tweetText, tweet)) {
+        return false;
+      }
+      return Boolean(textOf(tweetText));
+    }) || null;
+}
+
+export function findLongformTarget(tweet) {
+  const selectors = [
+    LONGFORM_BODY_SELECTOR,
+    LONGFORM_READ_VIEW_SELECTOR,
+    LONGFORM_TITLE_SELECTOR,
+  ];
+
+  for (const selector of selectors) {
+    for (const target of tweet?.querySelectorAll?.(selector) || []) {
+      if (
+        target.closest?.('article[data-testid="tweet"]') === tweet &&
+        !isInsideExcludedTweetContent(target, tweet)
+      ) {
+        return target;
+      }
+    }
+  }
+
+  return null;
+}
+
+export function isLongformTweet(tweet) {
+  return Boolean(findLongformTarget(tweet));
 }
 
 export function findShowMoreButton(tweet) {
@@ -98,22 +167,18 @@ export function findShowMoreButton(tweet) {
       if (button.closest('article[data-testid="tweet"]') !== tweet) {
         return false;
       }
-      return !button.closest('[data-testid="card.wrapper"]');
+      return !isInsideExcludedTweetContent(button, tweet);
     }) || null;
 }
 
 export function extractTweetText(tweet) {
-  const tweetText = tweet?.querySelector?.(TWEET_TEXT_SELECTOR);
+  const tweetText = findPrimaryTweetText(tweet);
   return textOf(tweetText);
 }
 
 export function getTweetMetadata(tweet) {
   const statusLinks = Array.from(tweet?.querySelectorAll?.('a[href*="/status/"]') || []);
-  const topLevelStatusLinks = statusLinks.filter((link) => {
-    const nestedInteractive = link.parentElement?.closest?.('a[href], [role="link"], [data-testid="card.wrapper"]');
-    return !nestedInteractive || nestedInteractive === link;
-  });
-  const candidates = topLevelStatusLinks.length > 0 ? topLevelStatusLinks : statusLinks;
+  const candidates = statusLinks.filter((link) => !isEmbeddedStatusLink(link, tweet));
   const preferredLink = candidates.find((link) => link.querySelector("time")) || candidates[0];
   const statusLink = preferredLink?.getAttribute("href");
 
@@ -134,15 +199,20 @@ export function replaceTweetTextWithTranslation(tweet, translation) {
   }
 
   tweet.querySelector("[data-xat-status]")?.remove();
-  for (const staleTranslation of tweet.querySelectorAll("[data-xat-translation]")) {
-    if (!staleTranslation.matches(TWEET_TEXT_SELECTOR)) {
-      staleTranslation.remove();
-    }
-  }
-
-  const tweetText = tweet.querySelector(TWEET_TEXT_SELECTOR);
+  const tweetText = findPrimaryTweetText(tweet);
   if (!tweetText) {
     return null;
+  }
+
+  for (const staleTranslation of tweet.querySelectorAll("[data-xat-translation]")) {
+    if (staleTranslation === tweetText) {
+      continue;
+    }
+    if (staleTranslation.matches(TWEET_TEXT_SELECTOR)) {
+      staleTranslation.removeAttribute("data-xat-translation");
+    } else {
+      staleTranslation.remove();
+    }
   }
 
   if (!tweetText.hasAttribute("data-xat-original-text")) {
@@ -166,7 +236,7 @@ export function renderTranslationStatus(tweet, message) {
     return existing;
   }
 
-  const tweetText = tweet.querySelector(TWEET_TEXT_SELECTOR);
+  const statusTarget = findPrimaryTweetText(tweet) || findLongformTarget(tweet);
   const status = tweet.ownerDocument.createElement("div");
   status.setAttribute("data-xat-status", "1");
   status.textContent = message;
@@ -175,8 +245,8 @@ export function renderTranslationStatus(tweet, message) {
   status.style.fontSize = "13px";
   status.style.lineHeight = "18px";
 
-  if (tweetText?.parentElement) {
-    tweetText.parentElement.insertBefore(status, tweetText.nextSibling);
+  if (statusTarget?.parentElement) {
+    statusTarget.parentElement.insertBefore(status, statusTarget.nextSibling);
   } else {
     tweet.append(status);
   }
@@ -276,6 +346,15 @@ export function createTweetProcessor(options = {}) {
       await waitForStableText(tweet);
     }
 
+    if (config.autoTranslate && isLongformTweet(tweet)) {
+      const metadata = getTweetMetadata(tweet);
+      renderTranslationStatus(tweet, LONGFORM_UNSUPPORTED_MESSAGE);
+      tweet.dataset.xatState = "skipped";
+      tweet.dataset.xatSkippedAt = String(now());
+      onEvent("longform-unsupported", metadata || {});
+      return;
+    }
+
     if (config.autoTranslate && typeof config.requestTranslation === "function") {
       const metadata = getTweetMetadata(tweet);
       if (!metadata) {
@@ -340,6 +419,10 @@ export function createTweetProcessor(options = {}) {
 }
 
 export const selectors = {
+  cardWrapper: CARD_WRAPPER_SELECTOR,
+  longformBody: LONGFORM_BODY_SELECTOR,
+  longformReadView: LONGFORM_READ_VIEW_SELECTOR,
+  longformTitle: LONGFORM_TITLE_SELECTOR,
   showMore: SHOW_MORE_SELECTOR,
   tweetText: TWEET_TEXT_SELECTOR,
 };
