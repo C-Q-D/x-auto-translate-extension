@@ -6,6 +6,8 @@
   var MAX_CACHE_ENTRIES = 500;
   var TRANSLATION_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
   var SKIP_CACHE_TTL_MS = 6 * 60 * 60 * 1e3;
+  var TRANSLATION_RETRY_ATTEMPTS = 3;
+  var TRANSLATION_RETRY_DELAY_MS = 700;
   var TRANSLATION_ENDPOINT = "https://api.x.com/2/grok/translation.json";
   var X_WEB_BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
   var STAT_COUNTERS = {
@@ -30,10 +32,13 @@
       return "";
     }
   }
-  function withTimeout(promise, timeoutMs, errorMessage) {
+  function withTimeout(promise, timeoutMs, errorMessage, onTimeout) {
     let timeoutId;
     const timeout = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+      timeoutId = setTimeout(() => {
+        onTimeout?.();
+        reject(new Error(errorMessage));
+      }, timeoutMs);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
   }
@@ -64,6 +69,37 @@
   }
   function normalizeTranslationText(text) {
     return typeof text === "string" ? text.trim() : "";
+  }
+  function createAbortController() {
+    return typeof AbortController === "function" ? new AbortController() : null;
+  }
+  function isRetryableHttpStatus(status) {
+    return status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+  function removeInternalRetryFields(result) {
+    if (!result || typeof result !== "object") {
+      return result;
+    }
+    const { retryable, ...publicResult } = result;
+    return publicResult;
+  }
+  async function readJsonPayload(response) {
+    if (typeof response?.text === "function") {
+      const body = await response.text();
+      try {
+        return { payload: JSON.parse(body) };
+      } catch {
+        return { error: "translation-json-parse-failed", retryable: true };
+      }
+    }
+    try {
+      return { payload: await response.json() };
+    } catch (error) {
+      return {
+        error: error instanceof SyntaxError ? "translation-json-parse-failed" : error?.message || "translation-json-read-failed",
+        retryable: true
+      };
+    }
   }
   function encodeBase64Bytes(bytes) {
     let binary = "";
@@ -101,12 +137,33 @@
     const translationTimeoutMs = options.translationTimeoutMs ?? TRANSLATION_TIMEOUT_MS;
     const translationCacheTtlMs = options.translationCacheTtlMs ?? TRANSLATION_CACHE_TTL_MS;
     const skipCacheTtlMs = options.skipCacheTtlMs ?? SKIP_CACHE_TTL_MS;
+    const translationRetryAttempts = Math.max(1, Number(options.translationRetryAttempts ?? TRANSLATION_RETRY_ATTEMPTS));
+    const translationRetryDelayMs = Math.max(0, Number(options.translationRetryDelayMs ?? TRANSLATION_RETRY_DELAY_MS));
     const now = options.now || (() => Date.now());
+    const wait = options.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     const fetchApi = options.fetch || globalThis.fetch?.bind(globalThis);
     const transactionIdFactory = options.transactionIdFactory || generateClientTransactionId;
     const inFlight = /* @__PURE__ */ new Map();
     const cache = /* @__PURE__ */ new Map();
     const skipCache = /* @__PURE__ */ new Map();
+    async function waitForRetryDelay(ms, signal) {
+      if (signal?.aborted) {
+        return false;
+      }
+      if (!signal?.addEventListener) {
+        await wait(ms);
+        return !signal?.aborted;
+      }
+      let abortListener;
+      const retryDelay = wait(ms).then(() => true, () => true);
+      const aborted = new Promise((resolve) => {
+        abortListener = () => resolve(false);
+        signal.addEventListener("abort", abortListener, { once: true });
+      });
+      const shouldContinue = await Promise.race([retryDelay, aborted]);
+      signal.removeEventListener("abort", abortListener);
+      return shouldContinue && !signal.aborted;
+    }
     async function getPersistentCache() {
       if (!chromeApi.storage?.local) {
         return { translations: {}, skipped: {} };
@@ -170,16 +227,14 @@
         }
       });
     }
-    async function requestTranslationFromApi({ id, csrfToken, dstLang = "zh" }) {
-      if (!csrfToken) {
-        return { ok: false, error: "missing-csrf-token" };
-      }
-      if (!fetchApi) {
-        return { ok: false, error: "translation-fetch-unavailable" };
+    async function requestTranslationAttempt({ id, csrfToken, dstLang = "zh", signal }) {
+      if (signal?.aborted) {
+        return { ok: false, error: "translation-request-timeout" };
       }
       const response = await fetchApi(TRANSLATION_ENDPOINT, {
         method: "POST",
         credentials: "include",
+        signal,
         headers: createTranslationHeaders(csrfToken, transactionIdFactory()),
         body: JSON.stringify({
           content_type: "POST",
@@ -188,14 +243,51 @@
         })
       });
       if (!response?.ok) {
-        return { ok: false, error: `translation-http-${response?.status || 0}` };
+        const status = response?.status || 0;
+        return { ok: false, error: `translation-http-${status}`, retryable: isRetryableHttpStatus(status) };
       }
-      const payload = await response.json();
+      const { payload, error, retryable } = await readJsonPayload(response);
+      if (error) {
+        return { ok: false, error, retryable };
+      }
       const translation = normalizeTranslationText(payload?.result?.text);
       if (!translation) {
         return { ok: false, skipped: true, error: "empty-translation" };
       }
       return { ok: true, translation };
+    }
+    async function requestTranslationFromApi({ id, csrfToken, dstLang = "zh", signal }) {
+      if (!csrfToken) {
+        return { ok: false, error: "missing-csrf-token" };
+      }
+      if (!fetchApi) {
+        return { ok: false, error: "translation-fetch-unavailable" };
+      }
+      let lastResult = null;
+      for (let attempt = 1; attempt <= translationRetryAttempts; attempt += 1) {
+        if (signal?.aborted) {
+          return { ok: false, error: "translation-request-timeout" };
+        }
+        try {
+          const result = await requestTranslationAttempt({ id, csrfToken, dstLang, signal });
+          if (!result?.retryable) {
+            return removeInternalRetryFields(result);
+          }
+          lastResult = result;
+        } catch (error) {
+          if (signal?.aborted || error?.name === "AbortError") {
+            return { ok: false, error: "translation-request-timeout" };
+          }
+          lastResult = { ok: false, error: "translation-fetch-failed", retryable: true };
+        }
+        if (attempt < translationRetryAttempts) {
+          const shouldContinue = await waitForRetryDelay(translationRetryDelayMs * attempt, signal);
+          if (!shouldContinue) {
+            return { ok: false, error: "translation-request-timeout" };
+          }
+        }
+      }
+      return removeInternalRetryFields(lastResult || { ok: false, error: "translation-failed" });
     }
     async function translateTweet({ id, url, csrfToken, dstLang = "zh" } = {}) {
       const urlStatusId = getStatusIdFromUrl(url);
@@ -210,11 +302,13 @@
         return inFlight.get(id);
       }
       const promise = (async () => {
+        const abortController = createAbortController();
         try {
           const result = await withTimeout(
-            requestTranslationFromApi({ id, csrfToken, dstLang }),
+            requestTranslationFromApi({ id, csrfToken, dstLang, signal: abortController?.signal }),
             translationTimeoutMs,
-            "translation-request-timeout"
+            "translation-request-timeout",
+            () => abortController?.abort()
           );
           if (result?.ok && result.translation) {
             cache.set(id, { value: result.translation, updatedAt: now() });

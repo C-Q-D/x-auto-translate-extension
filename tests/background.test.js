@@ -45,8 +45,11 @@ function createFetchResponse(status, body) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    async text() {
+      return typeof body === "string" ? body : JSON.stringify(body);
+    },
     async json() {
-      return body;
+      return typeof body === "string" ? JSON.parse(body) : body;
     },
   };
 }
@@ -124,7 +127,7 @@ test("background rejects direct API translation without a csrf token", async () 
 
 test("background returns failure for non-2xx translation API responses", async () => {
   const { chrome, storage } = createChromeMock();
-  const { fetchApi } = createFetchMock({
+  const { fetchApi, calls: fetchCalls } = createFetchMock({
     responses: [createFetchResponse(403, { errors: [{ message: "Forbidden" }] })],
   });
   const controller = createBackgroundController(chrome, { fetch: fetchApi });
@@ -132,6 +135,7 @@ test("background returns failure for non-2xx translation API responses", async (
   const result = await controller.translateTweet(METADATA);
 
   assert.deepEqual(result, { ok: false, error: "translation-http-403" });
+  assert.equal(fetchCalls.length, 1);
   assert.equal(storage.xatStats.failed, 1);
   assert.equal(storage.xatStats.lastEvent, "background-translation-failed");
   assert.equal(storage.xatStats.lastError, "translation-http-403");
@@ -152,6 +156,74 @@ test("background treats empty result text as skipped and caches it", async () =>
   assert.equal(fetchCalls.length, 1);
   assert.equal(storage.xatStats.skipped, 1);
   assert.equal(storage.xatTranslationCache.skipped[TWEET_ID].updatedAt, 789012);
+});
+
+test("background retries malformed translation JSON before returning a later success", async () => {
+  const { chrome, storage } = createChromeMock();
+  const { fetchApi, calls: fetchCalls } = createFetchMock({
+    responses: [
+      createFetchResponse(200, '{"result":{"text":""}}\n<!doctype html>'),
+      createFetchResponse(200, { result: { text: "重试后的译文" } }),
+    ],
+  });
+  const controller = createBackgroundController(chrome, {
+    fetch: fetchApi,
+    now: () => 789012,
+    wait: async () => {},
+  });
+
+  const result = await controller.translateTweet(METADATA);
+
+  assert.deepEqual(result, { ok: true, translation: "重试后的译文" });
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(storage.xatTranslationCache.translations[TWEET_ID].value, "重试后的译文");
+  assert.equal(storage.xatStats?.failed || 0, 0);
+});
+
+test("background normalizes repeated malformed translation JSON failures", async () => {
+  const { chrome, storage } = createChromeMock();
+  const { fetchApi, calls: fetchCalls } = createFetchMock({
+    responses: [createFetchResponse(200, '{"result":{"text":""}}\n<!doctype html>')],
+  });
+  const controller = createBackgroundController(chrome, {
+    fetch: fetchApi,
+    translationRetryAttempts: 2,
+    wait: async () => {},
+  });
+
+  const result = await controller.translateTweet(METADATA);
+
+  assert.deepEqual(result, { ok: false, error: "translation-json-parse-failed" });
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(storage.xatStats.failed, 1);
+  assert.equal(storage.xatStats.lastError, "translation-json-parse-failed");
+  assert.equal(storage.xatTranslationCache, undefined);
+});
+
+test("background stops retrying after the translation request times out", async () => {
+  const { chrome, storage } = createChromeMock();
+  const { fetchApi, calls: fetchCalls } = createFetchMock({
+    responses: [createFetchResponse(200, '{"result":{"text":""}}\n<!doctype html>')],
+  });
+  const retryWaits = [];
+  const controller = createBackgroundController(chrome, {
+    fetch: fetchApi,
+    translationRetryAttempts: 3,
+    translationRetryDelayMs: 1000,
+    translationTimeoutMs: 1,
+    wait: () => new Promise((resolve) => retryWaits.push(resolve)),
+  });
+
+  const result = await controller.translateTweet(METADATA);
+  assert.deepEqual(result, { ok: false, error: "translation-request-timeout" });
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(storage.xatStats.failed, 1);
+  assert.equal(storage.xatStats.lastError, "translation-request-timeout");
+
+  retryWaits[0]();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(fetchCalls.length, 1);
 });
 
 test("background restores translated cache from storage after controller restart", async () => {
