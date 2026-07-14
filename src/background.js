@@ -1,3 +1,5 @@
+import { createTranslationPipeline } from "./translationPipeline.js";
+
 const TRANSLATION_TIMEOUT_MS = 45000;
 const STATS_KEY = "xatStats";
 const CACHE_KEY = "xatTranslationCache";
@@ -168,6 +170,12 @@ export function createBackgroundController(chromeApi, options = {}) {
   const inFlight = new Map();
   const cache = new Map();
   const skipCache = new Map();
+  const translationPipeline = createTranslationPipeline(options.translationProviders || [
+    {
+      id: "x",
+      translate: requestTranslationFromApi,
+    },
+  ]);
 
   async function waitForRetryDelay(ms, signal) {
     if (signal?.aborted) {
@@ -357,7 +365,7 @@ export function createBackgroundController(chromeApi, options = {}) {
       const abortController = createAbortController();
       try {
         const result = await withTimeout(
-          requestTranslationFromApi({ id, csrfToken, dstLang, signal: abortController?.signal }),
+          translationPipeline.translate({ id, csrfToken, dstLang, signal: abortController?.signal }),
           translationTimeoutMs,
           "translation-request-timeout",
           () => abortController?.abort(),

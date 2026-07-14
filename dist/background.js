@@ -1,4 +1,38 @@
 (() => {
+  // src/translationPipeline.js
+  function toPublicResult(result) {
+    if (!result || typeof result !== "object") {
+      return { ok: false, error: "translation-provider-invalid-result" };
+    }
+    const { fallback, ...publicResult } = result;
+    return publicResult;
+  }
+  function createTranslationPipeline(providers = []) {
+    if (!Array.isArray(providers)) {
+      throw new TypeError("translation providers must be an array");
+    }
+    const orderedProviders = providers.map((provider) => {
+      if (!provider?.id || typeof provider.translate !== "function") {
+        throw new TypeError("each translation provider must have an id and translate function");
+      }
+      return provider;
+    });
+    async function translate(request) {
+      if (orderedProviders.length === 0) {
+        return { ok: false, error: "translation-provider-unavailable" };
+      }
+      let lastResult;
+      for (const provider of orderedProviders) {
+        lastResult = await provider.translate(request);
+        if (!lastResult?.fallback) {
+          return toPublicResult(lastResult);
+        }
+      }
+      return toPublicResult(lastResult);
+    }
+    return { translate };
+  }
+
   // src/background.js
   var TRANSLATION_TIMEOUT_MS = 45e3;
   var STATS_KEY = "xatStats";
@@ -146,6 +180,12 @@
     const inFlight = /* @__PURE__ */ new Map();
     const cache = /* @__PURE__ */ new Map();
     const skipCache = /* @__PURE__ */ new Map();
+    const translationPipeline = createTranslationPipeline(options.translationProviders || [
+      {
+        id: "x",
+        translate: requestTranslationFromApi
+      }
+    ]);
     async function waitForRetryDelay(ms, signal) {
       if (signal?.aborted) {
         return false;
@@ -305,7 +345,7 @@
         const abortController = createAbortController();
         try {
           const result = await withTimeout(
-            requestTranslationFromApi({ id, csrfToken, dstLang, signal: abortController?.signal }),
+            translationPipeline.translate({ id, csrfToken, dstLang, signal: abortController?.signal }),
             translationTimeoutMs,
             "translation-request-timeout",
             () => abortController?.abort()

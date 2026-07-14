@@ -100,6 +100,31 @@ test("background calls X Grok translation API and returns result text", async ()
   assert.equal(chromeCalls.some(([name]) => name === "tabs.create"), false);
 });
 
+test("background routes translation through the configured provider pipeline", async () => {
+  const { chrome } = createChromeMock();
+  const providerCalls = [];
+  const controller = createBackgroundController(chrome, {
+    translationProviders: [
+      {
+        id: "test-provider",
+        async translate(request) {
+          providerCalls.push(request);
+          return { ok: true, translation: "Provider 译文" };
+        },
+      },
+    ],
+  });
+
+  const result = await controller.translateTweet(METADATA);
+
+  assert.deepEqual(result, { ok: true, translation: "Provider 译文" });
+  assert.equal(providerCalls.length, 1);
+  assert.equal(providerCalls[0].id, TWEET_ID);
+  assert.equal(providerCalls[0].csrfToken, "csrf-token");
+  assert.equal(providerCalls[0].dstLang, "zh");
+  assert.equal(providerCalls[0].signal instanceof AbortSignal, true);
+});
+
 test("background rejects metadata when id does not match the status URL", async () => {
   const { chrome } = createChromeMock();
   const { fetchApi, calls: fetchCalls } = createFetchMock();
