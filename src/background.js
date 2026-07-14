@@ -1,3 +1,5 @@
+// 本文件负责扩展后台消息处理、翻译请求路由、缓存和第三方翻译服务配置管理。
+// 普通帖子默认优先使用 X 自带接口，只有可兜底失败时才交给第三方 provider。
 import { createTranslationPipeline } from "./translationPipeline.js";
 import { createTencentTranslationProvider } from "./providers/tencentTranslationProvider.js";
 
@@ -277,21 +279,8 @@ export function createBackgroundController(chromeApi, options = {}) {
     };
   }
 
-  async function translateWithProviders(request) {
-    if (configuredTranslationPipeline) {
-      return configuredTranslationPipeline.translate(request);
-    }
-
-    const providers = [{
-      id: "x",
-      async translate(providerRequest) {
-        const result = await requestTranslationFromApi(providerRequest);
-        const normalizedResult = result?.ok ? { ...result, provider: "x" } : result;
-        return shouldFallbackFromX(normalizedResult)
-          ? { ...normalizedResult, fallback: true }
-          : normalizedResult;
-      },
-    }];
+  async function createThirdPartyProviderAdapters() {
+    const providers = [];
     const tencentConfig = (await getProviderSettings()).tencent;
     if (tencentConfig?.secretId && tencentConfig?.secretKey) {
       const tencentProvider = tencentProviderFactory({
@@ -311,6 +300,26 @@ export function createBackgroundController(chromeApi, options = {}) {
         },
       });
     }
+
+    return providers;
+  }
+
+  async function translateWithProviders(request) {
+    if (configuredTranslationPipeline) {
+      return configuredTranslationPipeline.translate(request);
+    }
+
+    // X provider 只在可重试/限流/服务异常时声明 fallback，避免业务性失败误走第三方。
+    const providers = [{
+      id: "x",
+      async translate(providerRequest) {
+        const result = await requestTranslationFromApi(providerRequest);
+        const normalizedResult = result?.ok ? { ...result, provider: "x" } : result;
+        return shouldFallbackFromX(normalizedResult)
+          ? { ...normalizedResult, fallback: true }
+          : normalizedResult;
+      },
+    }, ...(await createThirdPartyProviderAdapters())];
 
     return createTranslationPipeline(providers).translate(request);
   }

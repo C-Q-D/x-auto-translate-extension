@@ -475,18 +475,8 @@
         ...result?.providerCode ? { providerCode: result.providerCode } : {}
       };
     }
-    async function translateWithProviders(request) {
-      if (configuredTranslationPipeline) {
-        return configuredTranslationPipeline.translate(request);
-      }
-      const providers = [{
-        id: "x",
-        async translate(providerRequest) {
-          const result = await requestTranslationFromApi(providerRequest);
-          const normalizedResult = result?.ok ? { ...result, provider: "x" } : result;
-          return shouldFallbackFromX(normalizedResult) ? { ...normalizedResult, fallback: true } : normalizedResult;
-        }
-      }];
+    async function createThirdPartyProviderAdapters() {
+      const providers = [];
       const tencentConfig = (await getProviderSettings()).tencent;
       if (tencentConfig?.secretId && tencentConfig?.secretKey) {
         const tencentProvider = tencentProviderFactory({
@@ -506,6 +496,20 @@
           }
         });
       }
+      return providers;
+    }
+    async function translateWithProviders(request) {
+      if (configuredTranslationPipeline) {
+        return configuredTranslationPipeline.translate(request);
+      }
+      const providers = [{
+        id: "x",
+        async translate(providerRequest) {
+          const result = await requestTranslationFromApi(providerRequest);
+          const normalizedResult = result?.ok ? { ...result, provider: "x" } : result;
+          return shouldFallbackFromX(normalizedResult) ? { ...normalizedResult, fallback: true } : normalizedResult;
+        }
+      }, ...await createThirdPartyProviderAdapters()];
       return createTranslationPipeline(providers).translate(request);
     }
     async function waitForRetryDelay(ms, signal) {
