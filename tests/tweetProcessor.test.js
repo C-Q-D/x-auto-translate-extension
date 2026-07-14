@@ -532,7 +532,7 @@ test("processor translates standalone X Article rich text view using status URL 
       id: "2071337983899271175",
       url: "https://x.com/0xwhrrari/status/2071337983899271175",
       contentType: "longform",
-      text: "Emails. Reports. Formatting. Most knowledge workers spend time on necessary work.",
+      text: "How I Use Claude Cowork to Run Like a One-Person Company Emails. Reports. Formatting. Most knowledge workers spend time on necessary work.",
     },
   ]);
   assert.equal(readView.dataset.xatState, "translated");

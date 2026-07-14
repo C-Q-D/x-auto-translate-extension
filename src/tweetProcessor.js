@@ -5,6 +5,7 @@ const TWEET_TEXT_SELECTOR = '[data-testid="tweetText"]';
 const CARD_WRAPPER_SELECTOR = '[data-testid="card.wrapper"]';
 const LONGFORM_READ_VIEW_SELECTOR = '[data-testid="twitterArticleReadView"], [data-testid="twitterArticleRichTextView"]';
 const LONGFORM_TITLE_SELECTOR = '[data-testid="twitter-article-title"]';
+const LONGFORM_TITLE_FALLBACK_SELECTOR = "span.css-1jxf684.r-bcqeeo.r-1ttztb7.r-qvutc0.r-poiln3";
 const LONGFORM_BODY_SELECTOR = '[data-testid="longformRichTextComponent"]';
 const INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';
 const LONGFORM_CONTENT_TYPE = "longform";
@@ -208,6 +209,33 @@ export function findXArticleTargets(root = document) {
   return findTweetArticles(root).filter((target) => isLongformTweet(target));
 }
 
+/**
+ * 查找 X Article 的标题元素。
+ * 新版 X 的真实标题没有稳定 data-testid，只保留通用文本 class；因此从正文容器向前选择最近的非交互文本元素。
+ *
+ * @param {Element} readView 长文正文阅读容器。
+ * @returns {Element | null} 匹配到的标题元素；没有可靠候选时返回 null。
+ * @sideEffects 本函数只读取 DOM，不修改页面。
+ */
+function findLongformTitle(readView) {
+  const legacyTitle = readView?.querySelector?.(LONGFORM_TITLE_SELECTOR);
+  if (legacyTitle) {
+    return legacyTitle;
+  }
+
+  const scope = readView?.closest?.('article[data-testid="tweet"], main') || readView?.parentElement;
+  const followingFlag = readView?.ownerDocument?.defaultView?.Node?.DOCUMENT_POSITION_FOLLOWING || 4;
+  const candidates = Array.from(scope?.querySelectorAll?.(LONGFORM_TITLE_FALLBACK_SELECTOR) || [])
+    .filter((candidate) => {
+      if (!textOf(candidate) || candidate.closest("a[href], button, [role='button'], [role='link']")) {
+        return false;
+      }
+      return Boolean(candidate.compareDocumentPosition(readView) & followingFlag);
+    });
+
+  return candidates.at(-1) || null;
+}
+
 export function extractLongformText(tweet) {
   const target = findLongformTarget(tweet);
   const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR)
@@ -219,7 +247,7 @@ export function extractLongformText(tweet) {
 
   // 长文由标题和富文本正文组成；后台第三方翻译依赖完整文本，所以这里按阅读顺序拼接。
   const parts = [
-    textOf(readView.querySelector(LONGFORM_TITLE_SELECTOR)),
+    textOf(findLongformTitle(readView)),
     textOf(readView.querySelector(LONGFORM_BODY_SELECTOR)),
   ].filter(Boolean);
 

@@ -5,6 +5,7 @@
   var CARD_WRAPPER_SELECTOR = '[data-testid="card.wrapper"]';
   var LONGFORM_READ_VIEW_SELECTOR = '[data-testid="twitterArticleReadView"], [data-testid="twitterArticleRichTextView"]';
   var LONGFORM_TITLE_SELECTOR = '[data-testid="twitter-article-title"]';
+  var LONGFORM_TITLE_FALLBACK_SELECTOR = "span.css-1jxf684.r-bcqeeo.r-1ttztb7.r-qvutc0.r-poiln3";
   var LONGFORM_BODY_SELECTOR = '[data-testid="longformRichTextComponent"]';
   var INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';
   var LONGFORM_CONTENT_TYPE = "longform";
@@ -150,6 +151,21 @@
   function findXArticleTargets(root = document) {
     return findTweetArticles(root).filter((target) => isLongformTweet(target));
   }
+  function findLongformTitle(readView) {
+    const legacyTitle = readView?.querySelector?.(LONGFORM_TITLE_SELECTOR);
+    if (legacyTitle) {
+      return legacyTitle;
+    }
+    const scope = readView?.closest?.('article[data-testid="tweet"], main') || readView?.parentElement;
+    const followingFlag = readView?.ownerDocument?.defaultView?.Node?.DOCUMENT_POSITION_FOLLOWING || 4;
+    const candidates = Array.from(scope?.querySelectorAll?.(LONGFORM_TITLE_FALLBACK_SELECTOR) || []).filter((candidate) => {
+      if (!textOf(candidate) || candidate.closest("a[href], button, [role='button'], [role='link']")) {
+        return false;
+      }
+      return Boolean(candidate.compareDocumentPosition(readView) & followingFlag);
+    });
+    return candidates.at(-1) || null;
+  }
   function extractLongformText(tweet) {
     const target = findLongformTarget(tweet);
     const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR) ? target : target?.closest?.(LONGFORM_READ_VIEW_SELECTOR);
@@ -157,7 +173,7 @@
       return "";
     }
     const parts = [
-      textOf(readView.querySelector(LONGFORM_TITLE_SELECTOR)),
+      textOf(findLongformTitle(readView)),
       textOf(readView.querySelector(LONGFORM_BODY_SELECTOR))
     ].filter(Boolean);
     return normalizeText(parts.join("\n\n"));
