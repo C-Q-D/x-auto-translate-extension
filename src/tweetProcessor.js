@@ -81,7 +81,14 @@ function closestWithin(element, selector, root) {
 }
 
 export function findTweetArticles(root = document) {
-  return Array.from(root.querySelectorAll?.('article[data-testid="tweet"]') || []);
+  const tweets = Array.from(root.querySelectorAll?.('article[data-testid="tweet"]') || []);
+  const longformRoots = [
+    ...(root.matches?.(LONGFORM_READ_VIEW_SELECTOR) ? [root] : []),
+    ...Array.from(root.querySelectorAll?.(LONGFORM_READ_VIEW_SELECTOR) || []),
+  ];
+  const standaloneLongforms = longformRoots
+    .filter((readView) => !readView.closest?.('article[data-testid="tweet"]'));
+  return [...tweets, ...standaloneLongforms];
 }
 
 export function shouldProcessTimelinePage(url) {
@@ -141,6 +148,13 @@ export function findLongformTarget(tweet) {
     LONGFORM_READ_VIEW_SELECTOR,
     LONGFORM_TITLE_SELECTOR,
   ];
+
+  if (
+    tweet?.matches?.(LONGFORM_READ_VIEW_SELECTOR) &&
+    !isInsideExcludedTweetContent(tweet, tweet)
+  ) {
+    return tweet;
+  }
 
   for (const selector of selectors) {
     for (const target of tweet?.querySelectorAll?.(selector) || []) {
@@ -216,7 +230,7 @@ export function getTweetMetadata(tweet) {
   const statusLinks = Array.from(tweet?.querySelectorAll?.('a[href*="/status/"]') || []);
   const candidates = statusLinks.filter((link) => !isEmbeddedStatusLink(link, tweet));
   const preferredLink = candidates.find((link) => link.querySelector("time")) || candidates[0];
-  const statusLink = preferredLink?.getAttribute("href");
+  const statusLink = preferredLink?.getAttribute("href") || tweet?.ownerDocument?.location?.pathname || globalThis.location?.pathname || "";
 
   const match = statusLink?.match(STATUS_URL_PATTERN);
   if (!match) {

@@ -200,16 +200,15 @@ test("Tencent provider splits long text into limited concurrent requests and mer
       activeRequests += 1;
       maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
       calls.push([url, options]);
-      const callIndex = calls.length;
       await new Promise((resolve) => setTimeout(resolve, 10));
       activeRequests -= 1;
       const { SourceText } = JSON.parse(options.body);
       return createResponse(200, {
         Response: {
-          RequestId: `request-${callIndex}`,
+          RequestId: `request-${SourceText[0]}`,
           Source: "en",
           Target: "zh",
-          TargetText: `译文${callIndex}:${SourceText.length}`,
+          TargetText: `译文${SourceText[0]}:${SourceText.length}`,
           UsedAmount: SourceText.length,
         },
       });
@@ -223,10 +222,13 @@ test("Tencent provider splits long text into limited concurrent requests and mer
     maxConcurrentRequests: 3,
   });
 
-  const result = await provider.translate({ text: "a".repeat(4500), targetLanguage: "zh" });
+  const result = await provider.translate({
+    text: `${"a".repeat(2000)}${"b".repeat(2000)}${"c".repeat(500)}`,
+    targetLanguage: "zh",
+  });
 
   assert.equal(result.ok, true);
-  assert.equal(result.translation, "译文1:2000\n\n译文2:2000\n\n译文3:500");
+  assert.equal(result.translation, "译文a:2000\n\n译文b:2000\n\n译文c:500");
   assert.equal(result.usage.characters, 4500);
   assert.equal(calls.length, 3);
   assert.ok(maxActiveRequests <= 3);

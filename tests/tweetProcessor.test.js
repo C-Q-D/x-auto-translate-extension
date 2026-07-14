@@ -8,6 +8,7 @@ import {
   createTweetProcessor,
   extractLongformText,
   extractTweetText,
+  findTweetArticles,
   findShowMoreButton,
   findTranslateButton,
   getTweetMetadata,
@@ -450,6 +451,57 @@ test("extracts primary X Article longform text in reading order", () => {
 
   const tweet = document.querySelector("article");
   assert.equal(extractLongformText(tweet), "Longform title Longform body paragraph Second paragraph");
+});
+
+test("finds standalone X Article read views outside tweet articles", () => {
+  setupDom(`
+    <main>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title">Standalone title</div>
+        <div data-testid="longformRichTextComponent">Standalone body</div>
+      </div>
+    </main>
+  `);
+
+  const readView = document.querySelector("[data-testid='twitterArticleReadView']");
+  assert.deepEqual(findTweetArticles(document), [readView]);
+  assert.deepEqual(findTweetArticles(readView), [readView]);
+});
+
+test("processor translates standalone X Article read view using status URL metadata", async () => {
+  const dom = setupDom(`
+    <main>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title">Standalone title</div>
+        <div data-testid="longformRichTextComponent">Standalone body</div>
+      </div>
+    </main>
+  `);
+  dom.reconfigure({ url: "https://x.com/0xwhrrari/status/2071337983899271175" });
+  const readView = document.querySelector("[data-testid='twitterArticleReadView']");
+  const requests = [];
+
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => 1000,
+    requestTranslation: async (metadata) => {
+      requests.push(metadata);
+      return { ok: true, translation: "独立长文译文", provider: "tencent" };
+    },
+  });
+
+  await processor.processTweet(readView);
+
+  assert.deepEqual(requests, [
+    {
+      id: "2071337983899271175",
+      url: "https://x.com/0xwhrrari/status/2071337983899271175",
+      contentType: "longform",
+      text: "Standalone title Standalone body",
+    },
+  ]);
+  assert.equal(readView.dataset.xatState, "translated");
+  assert.equal(readView.parentElement.querySelector("[data-xat-longform-translation]").textContent, "独立长文译文");
 });
 
 test("processor requests translation for X Article longform text", async () => {

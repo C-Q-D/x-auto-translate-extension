@@ -1,3 +1,5 @@
+// 本测试文件覆盖内容脚本在 X 页面中的观察、状态上报和翻译消息转发行为。
+// 重点保护详情页评论、时间线帖子和独立 X Article 长文都能被调度处理。
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
@@ -164,6 +166,50 @@ test("content script observes timeline tweets and reports popup status", async (
   assert.equal(response.showMoreCount, 1);
   assert.equal(response.translationCount, 1);
   assert.deepEqual(response.states, { translated: 1 });
+  dom.window.close();
+});
+
+test("content script observes standalone X Article read views on status pages", async () => {
+  const { dom, observed, observers, listeners, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleReadView">
+          <div data-testid="twitter-article-title">Standalone article title</div>
+          <div data-testid="longformRichTextComponent">Standalone article body</div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+
+  const readView = document.querySelector("[data-testid='twitterArticleReadView']");
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0], readView);
+  assert.equal(readView.dataset.xatObserved, "1");
+
+  let response;
+  listeners[0]({ type: "XAT_CONTENT_STATUS" }, null, (value) => {
+    response = value;
+  });
+  assert.equal(response.articleCount, 1);
+  assert.equal(response.observedCount, 1);
+
+  observers[0].callback([{ isIntersecting: true, target: readView }]);
+  await flushMutations();
+  await wait(650);
+
+  const message = sentMessages.find((entry) => entry.type === "XAT_TRANSLATE_TWEET");
+  assert.deepEqual(message.payload, {
+    id: "2071337983899271175",
+    url: "https://x.com/0xwhrrari/status/2071337983899271175",
+    contentType: "longform",
+    text: "Standalone article title Standalone article body",
+    csrfToken: "csrf-token",
+    dstLang: "zh",
+  });
   dom.window.close();
 });
 

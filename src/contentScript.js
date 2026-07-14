@@ -57,7 +57,7 @@ function getContentStatus() {
     url: globalThis.location?.href || "",
     canProcess: shouldProcessTimelinePage(globalThis.location?.href),
     articleCount: tweets.length,
-    observedCount: document.querySelectorAll('article[data-testid="tweet"][data-xat-observed="1"]').length,
+    observedCount: document.querySelectorAll("[data-xat-observed='1']").length,
     showMoreCount: document.querySelectorAll('button[data-testid="tweet-text-show-more-link"]').length,
     statusCount: document.querySelectorAll("[data-xat-status]").length,
     translationCount: document.querySelectorAll("[data-xat-translation]").length,
