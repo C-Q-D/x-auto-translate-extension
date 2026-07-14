@@ -157,6 +157,53 @@ if (globalThis.__xatContentScriptLoaded) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
+  /**
+   * 判断长文目标及其祖先容器是否仍参与当前页面展示。
+   * X 的单页导航可能暂时保留旧文章 DOM；隐藏节点不能作为手动翻译目标，否则会误报已有译文。
+   *
+   * @param {Element | null} target 候选长文节点。
+   * @returns {boolean} 节点已连接且未被自身或祖先隐藏时返回 true。
+   * @sideEffects 本函数只读取 DOM 和计算样式，不修改页面。
+   */
+  function isVisibleArticleTarget(target) {
+    if (!target?.isConnected) {
+      return false;
+    }
+
+    if (typeof target.checkVisibility === "function") {
+      try {
+        if (!target.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+          return false;
+        }
+      } catch {
+        // 旧版浏览器可能不接受可见性选项；继续使用下面的祖先样式检查作为兼容回退。
+      }
+    }
+
+    for (let current = target; current; current = current.parentElement) {
+      if (current.hidden || current.getAttribute?.("aria-hidden") === "true") {
+        return false;
+      }
+
+      const style = current.ownerDocument?.defaultView?.getComputedStyle?.(current);
+      if (style && (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0")) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * 从页面候选节点中选择当前可见的 X Article 长文。
+   *
+   * @returns {Element | null} 当前可见长文节点；不存在时返回 null。
+   * @sideEffects 本函数只扫描 DOM，不修改节点状态。
+   */
+  function findCurrentArticleTarget() {
+    return findXArticleTargets(document).find(isVisibleArticleTarget) || null;
+  }
+
   function waitForDocumentComplete(timeoutMs = MANUAL_ARTICLE_LOAD_TIMEOUT_MS) {
     if (document.readyState === "complete") {
       return Promise.resolve(true);
@@ -200,7 +247,7 @@ if (globalThis.__xatContentScriptLoaded) {
 
     for (let attempt = 0; attempt < MANUAL_ARTICLE_READY_ATTEMPTS; attempt += 1) {
       scan();
-      const target = findXArticleTargets(document)[0] || null;
+      const target = findCurrentArticleTarget();
       const text = target ? extractLongformText(target) : "";
 
       if (target && text) {
@@ -225,7 +272,7 @@ if (globalThis.__xatContentScriptLoaded) {
       await delay(MANUAL_ARTICLE_STABLE_INTERVAL_MS);
     }
 
-    return findXArticleTargets(document)[0] || null;
+    return findCurrentArticleTarget();
   }
 
   function hasRenderedArticleTranslation(target) {

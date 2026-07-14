@@ -566,6 +566,30 @@
       viewportObserver.observe(tweet);
     }, delay = function(ms) {
       return new Promise((resolve) => window.setTimeout(resolve, ms));
+    }, isVisibleArticleTarget = function(target) {
+      if (!target?.isConnected) {
+        return false;
+      }
+      if (typeof target.checkVisibility === "function") {
+        try {
+          if (!target.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+            return false;
+          }
+        } catch {
+        }
+      }
+      for (let current = target; current; current = current.parentElement) {
+        if (current.hidden || current.getAttribute?.("aria-hidden") === "true") {
+          return false;
+        }
+        const style = current.ownerDocument?.defaultView?.getComputedStyle?.(current);
+        if (style && (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0")) {
+          return false;
+        }
+      }
+      return true;
+    }, findCurrentArticleTarget = function() {
+      return findXArticleTargets(document).find(isVisibleArticleTarget) || null;
     }, waitForDocumentComplete = function(timeoutMs = MANUAL_ARTICLE_LOAD_TIMEOUT_MS) {
       if (document.readyState === "complete") {
         return Promise.resolve(true);
@@ -636,7 +660,7 @@
       let stablePasses = 0;
       for (let attempt = 0; attempt < MANUAL_ARTICLE_READY_ATTEMPTS; attempt += 1) {
         scan();
-        const target = findXArticleTargets(document)[0] || null;
+        const target = findCurrentArticleTarget();
         const text = target ? extractLongformText(target) : "";
         if (target && text) {
           if (target === previousTarget && text === previousText) {
@@ -656,7 +680,7 @@
         }
         await delay(MANUAL_ARTICLE_STABLE_INTERVAL_MS);
       }
-      return findXArticleTargets(document)[0] || null;
+      return findCurrentArticleTarget();
     }
     async function translateCurrentArticle() {
       if (!canProcessCurrentPage()) {

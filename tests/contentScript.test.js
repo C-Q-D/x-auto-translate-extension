@@ -436,6 +436,53 @@ test("manual article translation retries when translated state has no rendered l
   dom.window.close();
 });
 
+test("manual article translation ignores hidden translated longform targets", async () => {
+  const { dom, listeners, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <section hidden>
+        <div data-testid="twitterArticleRichTextView" data-xat-state="translated">
+          <div data-testid="longformRichTextComponent">Hidden stale article body.</div>
+        </div>
+        <div data-xat-longform-translation="1">隐藏的旧译文</div>
+      </section>
+      <main>
+        <div data-testid="twitterArticleRichTextView" id="current-article">
+          <div data-testid="longformRichTextComponent">Current visible article body.</div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+
+  let response;
+  listeners.forEach((listener) => listener(
+    { type: "XAT_FORCE_TRANSLATE_ARTICLE" },
+    null,
+    (value) => {
+      response = value;
+    },
+  ));
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.deepEqual(response, { ok: true, message: "文章翻译：已完成" });
+  const message = sentMessages.find((entry) => entry.type === "XAT_TRANSLATE_TWEET");
+  assert.deepEqual(message.payload, {
+    id: "2071337983899271175",
+    url: "https://x.com/0xwhrrari/status/2071337983899271175",
+    contentType: "longform",
+    text: "Current visible article body.",
+    csrfToken: "csrf-token",
+    dstLang: "zh",
+  });
+  assert.equal(document.querySelector("#current-article").dataset.xatState, "translated");
+  dom.window.close();
+});
+
 test("manual article translation does not fall back to ordinary tweets", async () => {
   const { dom, listeners, sentMessages } = setupDom(
     "https://x.com/openai/status/2071647677591466098",
