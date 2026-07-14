@@ -377,6 +377,7 @@ test("processor requests direct API translation after expansion and replaces twe
     {
       id: "2071647677591466098",
       url: "https://x.com/openai/status/2071647677591466098",
+      text: "Expanded complete text",
     },
   ]);
   assert.equal(tweet.dataset.xatState, "translated");
@@ -422,6 +423,7 @@ test("processor translates detail-page comment articles using their own metadata
     {
       id: "3333333333333333333",
       url: "https://x.com/reply/status/3333333333333333333",
+      text: "Visible reply text",
     },
   ]);
   assert.equal(comment.querySelector("[data-xat-translation]").textContent, "可见回复译文");
@@ -546,6 +548,7 @@ test("processor translates a normal tweet when it quotes an X Article card", asy
     {
       id: "2071647677591466098",
       url: "https://x.com/openai/status/2071647677591466098",
+      text: "Normal tweet with quoted article",
     },
   ]);
   assert.equal(tweet.dataset.xatState, "translated");
@@ -589,6 +592,7 @@ test("processor retries the current tweet after X reuses the article", async () 
   assert.deepEqual(await requested, {
     id: "1111111111111111111",
     url: "https://x.com/openai/status/1111111111111111111",
+    text: "First tweet",
   });
   tweet.querySelector("[data-status]").setAttribute("href", "/openai/status/2222222222222222222");
   tweet.querySelector("[data-testid='tweetText']").textContent = "Second tweet";

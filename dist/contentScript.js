@@ -267,13 +267,14 @@
         return;
       }
       tweet.dataset.xatState = "processing";
+      let expandedText = "";
       if (config.autoExpand) {
         const showMoreButton = findShowMoreButton(tweet);
         if (showMoreButton) {
           showMoreButton.click();
           onEvent("expanded", getTweetMetadata(tweet));
         }
-        await waitForStableText(tweet);
+        expandedText = await waitForStableText(tweet);
       }
       if (config.autoTranslate && isLongformTweet(tweet)) {
         const metadata = getTweetMetadata(tweet);
@@ -292,7 +293,10 @@
         }
         renderTranslationStatus(tweet, "\u6B63\u5728\u83B7\u53D6 X \u81EA\u5E26\u8BD1\u6587...");
         onEvent("translation-requested", metadata);
-        const result = await config.requestTranslation(metadata);
+        const result = await config.requestTranslation({
+          ...metadata,
+          text: expandedText || extractTweetText(tweet)
+        });
         const currentMetadata = getTweetMetadata(tweet);
         if (!tweet.isConnected) {
           tweet.querySelector("[data-xat-status]")?.remove();

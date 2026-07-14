@@ -125,6 +125,7 @@ test("content script observes detail-page tweets and dynamically inserted commen
   assert.deepEqual(translationRequest.payload, {
     id: "3333333333333333333",
     url: "https://x.com/reply/status/3333333333333333333",
+    text: "Hydrated detail comment",
     csrfToken: "csrf-token",
     dstLang: "zh",
   });
@@ -189,6 +190,7 @@ test("content script includes csrf token and zh target language in translation r
   assert.deepEqual(message.payload, {
     id: "2071647677591466098",
     url: "https://x.com/openai/status/2071647677591466098",
+    text: "Timeline tweet",
     csrfToken: "csrf-token",
     dstLang: "zh",
   });

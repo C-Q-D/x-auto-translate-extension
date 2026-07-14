@@ -336,6 +336,7 @@ export function createTweetProcessor(options = {}) {
     }
 
     tweet.dataset.xatState = "processing";
+    let expandedText = "";
 
     if (config.autoExpand) {
       const showMoreButton = findShowMoreButton(tweet);
@@ -343,7 +344,7 @@ export function createTweetProcessor(options = {}) {
         showMoreButton.click();
         onEvent("expanded", getTweetMetadata(tweet));
       }
-      await waitForStableText(tweet);
+      expandedText = await waitForStableText(tweet);
     }
 
     if (config.autoTranslate && isLongformTweet(tweet)) {
@@ -365,7 +366,10 @@ export function createTweetProcessor(options = {}) {
 
       renderTranslationStatus(tweet, "正在获取 X 自带译文...");
       onEvent("translation-requested", metadata);
-      const result = await config.requestTranslation(metadata);
+      const result = await config.requestTranslation({
+        ...metadata,
+        text: expandedText || extractTweetText(tweet),
+      });
       const currentMetadata = getTweetMetadata(tweet);
       if (!tweet.isConnected) {
         tweet.querySelector("[data-xat-status]")?.remove();
