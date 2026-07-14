@@ -7,7 +7,7 @@
   var LONGFORM_TITLE_SELECTOR = '[data-testid="twitter-article-title"]';
   var LONGFORM_BODY_SELECTOR = '[data-testid="longformRichTextComponent"]';
   var INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';
-  var LONGFORM_UNSUPPORTED_MESSAGE = "X \u6682\u4E0D\u8FD4\u56DE\u957F\u6587\u8BD1\u6587";
+  var LONGFORM_CONTENT_TYPE = "longform";
   var TRANSLATE_LABELS = [
     "\u663E\u793A\u7FFB\u8BD1",
     "\u7FFB\u8BD1\u5E16\u5B50",
@@ -127,6 +127,18 @@
   function isLongformTweet(tweet) {
     return Boolean(findLongformTarget(tweet));
   }
+  function extractLongformText(tweet) {
+    const target = findLongformTarget(tweet);
+    const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR) ? target : target?.closest?.(LONGFORM_READ_VIEW_SELECTOR);
+    if (!readView || isInsideExcludedTweetContent(readView, tweet)) {
+      return "";
+    }
+    const parts = [
+      textOf(readView.querySelector(LONGFORM_TITLE_SELECTOR)),
+      textOf(readView.querySelector(LONGFORM_BODY_SELECTOR))
+    ].filter(Boolean);
+    return normalizeText(parts.join("\n\n"));
+  }
   function findShowMoreButton(tweet) {
     return Array.from(tweet?.querySelectorAll?.(SHOW_MORE_SELECTOR) || []).find((button) => {
       if (!isVisible(button) || isDisabled(button)) {
@@ -141,6 +153,20 @@
   function extractTweetText(tweet) {
     const tweetText = findPrimaryTweetText(tweet);
     return textOf(tweetText);
+  }
+  function createTranslationRequestPayload(tweet, metadata, expandedText) {
+    const longformText = isLongformTweet(tweet) ? extractLongformText(tweet) : "";
+    if (longformText) {
+      return {
+        ...metadata,
+        contentType: LONGFORM_CONTENT_TYPE,
+        text: longformText
+      };
+    }
+    return {
+      ...metadata,
+      text: expandedText || extractTweetText(tweet)
+    };
   }
   function getTweetMetadata(tweet) {
     const statusLinks = Array.from(tweet?.querySelectorAll?.('a[href*="/status/"]') || []);
@@ -276,14 +302,6 @@
         }
         expandedText = await waitForStableText(tweet);
       }
-      if (config.autoTranslate && isLongformTweet(tweet)) {
-        const metadata = getTweetMetadata(tweet);
-        renderTranslationStatus(tweet, LONGFORM_UNSUPPORTED_MESSAGE);
-        tweet.dataset.xatState = "skipped";
-        tweet.dataset.xatSkippedAt = String(now());
-        onEvent("longform-unsupported", metadata || {});
-        return;
-      }
       if (config.autoTranslate && typeof config.requestTranslation === "function") {
         const metadata = getTweetMetadata(tweet);
         if (!metadata) {
@@ -291,12 +309,9 @@
           tweet.dataset.xatLastAttempt = String(now());
           return;
         }
-        renderTranslationStatus(tweet, "\u6B63\u5728\u83B7\u53D6 X \u81EA\u5E26\u8BD1\u6587...");
+        renderTranslationStatus(tweet, isLongformTweet(tweet) ? "\u6B63\u5728\u83B7\u53D6\u957F\u6587\u8BD1\u6587..." : "\u6B63\u5728\u83B7\u53D6 X \u81EA\u5E26\u8BD1\u6587...");
         onEvent("translation-requested", metadata);
-        const result = await config.requestTranslation({
-          ...metadata,
-          text: expandedText || extractTweetText(tweet)
-        });
+        const result = await config.requestTranslation(createTranslationRequestPayload(tweet, metadata, expandedText));
         const currentMetadata = getTweetMetadata(tweet);
         if (!tweet.isConnected) {
           tweet.querySelector("[data-xat-status]")?.remove();

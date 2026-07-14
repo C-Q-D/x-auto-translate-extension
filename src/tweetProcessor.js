@@ -1,3 +1,5 @@
+// 本文件负责识别 X 页面里的帖子、评论和长文正文，并把可翻译内容交给后台翻译管线。
+// 这里的 DOM 选择器需要尽量收窄到当前 article，避免把引用卡片或推荐内容误当成主内容。
 const SHOW_MORE_SELECTOR = 'button[data-testid="tweet-text-show-more-link"]';
 const TWEET_TEXT_SELECTOR = '[data-testid="tweetText"]';
 const CARD_WRAPPER_SELECTOR = '[data-testid="card.wrapper"]';
@@ -5,7 +7,7 @@ const LONGFORM_READ_VIEW_SELECTOR = '[data-testid="twitterArticleReadView"]';
 const LONGFORM_TITLE_SELECTOR = '[data-testid="twitter-article-title"]';
 const LONGFORM_BODY_SELECTOR = '[data-testid="longformRichTextComponent"]';
 const INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';
-const LONGFORM_UNSUPPORTED_MESSAGE = "X 暂不返回长文译文";
+const LONGFORM_CONTENT_TYPE = "longform";
 
 const TRANSLATE_LABELS = [
   "显示翻译",
@@ -158,6 +160,24 @@ export function isLongformTweet(tweet) {
   return Boolean(findLongformTarget(tweet));
 }
 
+export function extractLongformText(tweet) {
+  const target = findLongformTarget(tweet);
+  const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR)
+    ? target
+    : target?.closest?.(LONGFORM_READ_VIEW_SELECTOR);
+  if (!readView || isInsideExcludedTweetContent(readView, tweet)) {
+    return "";
+  }
+
+  // 长文由标题和富文本正文组成；后台第三方翻译依赖完整文本，所以这里按阅读顺序拼接。
+  const parts = [
+    textOf(readView.querySelector(LONGFORM_TITLE_SELECTOR)),
+    textOf(readView.querySelector(LONGFORM_BODY_SELECTOR)),
+  ].filter(Boolean);
+
+  return normalizeText(parts.join("\n\n"));
+}
+
 export function findShowMoreButton(tweet) {
   return Array.from(tweet?.querySelectorAll?.(SHOW_MORE_SELECTOR) || [])
     .find((button) => {
@@ -174,6 +194,22 @@ export function findShowMoreButton(tweet) {
 export function extractTweetText(tweet) {
   const tweetText = findPrimaryTweetText(tweet);
   return textOf(tweetText);
+}
+
+function createTranslationRequestPayload(tweet, metadata, expandedText) {
+  const longformText = isLongformTweet(tweet) ? extractLongformText(tweet) : "";
+  if (longformText) {
+    return {
+      ...metadata,
+      contentType: LONGFORM_CONTENT_TYPE,
+      text: longformText,
+    };
+  }
+
+  return {
+    ...metadata,
+    text: expandedText || extractTweetText(tweet),
+  };
 }
 
 export function getTweetMetadata(tweet) {
@@ -347,15 +383,6 @@ export function createTweetProcessor(options = {}) {
       expandedText = await waitForStableText(tweet);
     }
 
-    if (config.autoTranslate && isLongformTweet(tweet)) {
-      const metadata = getTweetMetadata(tweet);
-      renderTranslationStatus(tweet, LONGFORM_UNSUPPORTED_MESSAGE);
-      tweet.dataset.xatState = "skipped";
-      tweet.dataset.xatSkippedAt = String(now());
-      onEvent("longform-unsupported", metadata || {});
-      return;
-    }
-
     if (config.autoTranslate && typeof config.requestTranslation === "function") {
       const metadata = getTweetMetadata(tweet);
       if (!metadata) {
@@ -364,12 +391,9 @@ export function createTweetProcessor(options = {}) {
         return;
       }
 
-      renderTranslationStatus(tweet, "正在获取 X 自带译文...");
+      renderTranslationStatus(tweet, isLongformTweet(tweet) ? "正在获取长文译文..." : "正在获取 X 自带译文...");
       onEvent("translation-requested", metadata);
-      const result = await config.requestTranslation({
-        ...metadata,
-        text: expandedText || extractTweetText(tweet),
-      });
+      const result = await config.requestTranslation(createTranslationRequestPayload(tweet, metadata, expandedText));
       const currentMetadata = getTweetMetadata(tweet);
       if (!tweet.isConnected) {
         tweet.querySelector("[data-xat-status]")?.remove();

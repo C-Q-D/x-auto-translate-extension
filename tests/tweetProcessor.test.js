@@ -1,9 +1,12 @@
+// 本测试文件覆盖 X 页面 DOM 处理器的内容识别、自动展开、翻译请求和译文渲染行为。
+// 重点保护主帖/评论/长文与引用卡片之间的边界，避免自动翻译误处理嵌套内容。
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 
 import {
   createTweetProcessor,
+  extractLongformText,
   extractTweetText,
   findShowMoreButton,
   findTranslateButton,
@@ -430,7 +433,25 @@ test("processor translates detail-page comment articles using their own metadata
   assert.equal(comment.querySelector("[role='link'] [data-testid='tweetText']").textContent, "Quoted comment card");
 });
 
-test("processor marks X Article longform as unsupported without requesting translation", async () => {
+test("extracts primary X Article longform text in reading order", () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title">Longform title</div>
+        <div data-testid="longformRichTextComponent">
+          <p>Longform body paragraph</p>
+          <p>Second paragraph</p>
+        </div>
+      </div>
+    </article>
+  `);
+
+  const tweet = document.querySelector("article");
+  assert.equal(extractLongformText(tweet), "Longform title Longform body paragraph Second paragraph");
+});
+
+test("processor requests translation for X Article longform text", async () => {
   setupDom(`
     <article data-testid="tweet">
       <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
@@ -452,28 +473,26 @@ test("processor marks X Article longform as unsupported without requesting trans
     onEvent: (event, payload) => events.push([event, payload]),
     requestTranslation: async (metadata) => {
       requests.push(metadata);
-      return { translation: "不应该出现的译文" };
+      return { ok: false, error: "longform-provider-unavailable" };
     },
   });
 
   await processor.processTweet(tweet);
 
-  assert.deepEqual(requests, []);
-  assert.equal(tweet.dataset.xatState, "skipped");
-  assert.equal(tweet.dataset.xatSkippedAt, "1000");
-  assert.equal(tweet.querySelector("[data-xat-status]").textContent, "X 暂不返回长文译文");
-  assert.deepEqual(events, [
-    [
-      "longform-unsupported",
-      {
-        id: "2071912657133973977",
-        url: "https://x.com/writer/status/2071912657133973977",
-      },
-    ],
+  assert.deepEqual(requests, [
+    {
+      id: "2071912657133973977",
+      url: "https://x.com/writer/status/2071912657133973977",
+      contentType: "longform",
+      text: "Longform title Longform body paragraph",
+    },
   ]);
+  assert.equal(tweet.dataset.xatState, "expanded");
+  assert.equal(tweet.querySelector("[data-xat-status]").textContent, "X 暂时没有返回译文：longform-provider-unavailable");
+  assert.deepEqual(events.map(([event]) => event), ["translation-requested", "translation-failed"]);
 });
 
-test("processor still detects primary longform when a quoted longform appears first", async () => {
+test("processor requests only primary longform when a quoted longform appears first", async () => {
   setupDom(`
     <article data-testid="tweet">
       <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
@@ -501,15 +520,21 @@ test("processor still detects primary longform when a quoted longform appears fi
     now: () => 1000,
     requestTranslation: async (metadata) => {
       requests.push(metadata);
-      return { translation: "不应该请求的译文" };
+      return { ok: false, error: "longform-provider-unavailable" };
     },
   });
 
   await processor.processTweet(tweet);
 
-  assert.deepEqual(requests, []);
-  assert.equal(tweet.dataset.xatState, "skipped");
-  assert.equal(tweet.querySelector("[data-xat-status]").textContent, "X 暂不返回长文译文");
+  assert.deepEqual(requests, [
+    {
+      id: "2071912657133973977",
+      url: "https://x.com/writer/status/2071912657133973977",
+      contentType: "longform",
+      text: "Primary longform title Primary longform body paragraph",
+    },
+  ]);
+  assert.equal(tweet.dataset.xatState, "expanded");
 });
 
 test("processor translates a normal tweet when it quotes an X Article card", async () => {
