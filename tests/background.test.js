@@ -1,3 +1,5 @@
+// 本测试文件覆盖后台翻译路由、缓存、诊断计数和第三方翻译配置管理。
+// 重点验证普通帖子优先使用 X 自带接口，长文和失败兜底按 provider 管线稳定流转。
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -506,6 +508,50 @@ test("background falls back from repeated X rate limits to configured Tencent tr
   assert.equal(tencentCalls[0].text, "Hello from X");
   assert.equal(tencentCalls[0].sourceLanguage, "auto");
   assert.equal(tencentCalls[0].targetLanguage, "zh");
+  assert.equal(storage.xatTranslationCache.translations[TWEET_ID].provider, "tencent");
+});
+
+test("background routes longform text directly to configured third-party providers", async () => {
+  const { chrome, storage } = createChromeMock({
+    initialStorage: {
+      xatProviderSettings: {
+        tencent: {
+          secretId: "AKIDEXAMPLE",
+          secretKey: "example-secret",
+          region: "ap-guangzhou",
+        },
+      },
+    },
+  });
+  const { fetchApi, calls: fetchCalls } = createFetchMock({
+    responses: [createFetchResponse(200, { result: { text: "不应调用 X 接口" } })],
+  });
+  const thirdPartyCalls = [];
+  const controller = createBackgroundController(chrome, {
+    fetch: fetchApi,
+    now: () => 1710000000000,
+    tencentProviderFactory() {
+      return {
+        id: "tencent",
+        async translate(request) {
+          thirdPartyCalls.push(request);
+          return { ok: true, translation: "第三方长文译文", provider: "tencent" };
+        },
+      };
+    },
+  });
+
+  const result = await controller.translateTweet({
+    ...METADATA,
+    contentType: "longform",
+    text: "Longform title and body",
+  });
+
+  assert.deepEqual(result, { ok: true, translation: "第三方长文译文", provider: "tencent" });
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(thirdPartyCalls.length, 1);
+  assert.equal(thirdPartyCalls[0].text, "Longform title and body");
+  assert.equal(thirdPartyCalls[0].targetLanguage, "zh");
   assert.equal(storage.xatTranslationCache.translations[TWEET_ID].provider, "tencent");
 });
 

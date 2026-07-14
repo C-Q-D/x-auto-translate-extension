@@ -15,6 +15,7 @@ const TRANSLATION_RETRY_ATTEMPTS = 3;
 const TRANSLATION_RETRY_DELAY_MS = 700;
 const TRANSLATION_ENDPOINT = "https://api.x.com/2/grok/translation.json";
 const X_WEB_BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
+const LONGFORM_CONTENT_TYPE = "longform";
 const STAT_COUNTERS = {
   expanded: "expanded",
   "translation-requested": "requested",
@@ -324,6 +325,28 @@ export function createBackgroundController(chromeApi, options = {}) {
     return createTranslationPipeline(providers).translate(request);
   }
 
+  async function translateWithThirdPartyProviders(request) {
+    if (configuredTranslationPipeline) {
+      return configuredTranslationPipeline.translate(request);
+    }
+
+    const providers = await createThirdPartyProviderAdapters();
+    if (providers.length === 0) {
+      return { ok: false, error: "third-party-provider-unavailable" };
+    }
+
+    return createTranslationPipeline(providers).translate(request);
+  }
+
+  async function translateByContentType(request) {
+    // 长文正文不是 X 自带帖子译文接口的稳定能力，直接交给第三方 provider 管线处理。
+    if (request?.contentType === LONGFORM_CONTENT_TYPE) {
+      return translateWithThirdPartyProviders(request);
+    }
+
+    return translateWithProviders(request);
+  }
+
   async function waitForRetryDelay(ms, signal) {
     if (signal?.aborted) {
       return false;
@@ -507,7 +530,7 @@ export function createBackgroundController(chromeApi, options = {}) {
     return removeInternalRetryFields(lastResult || { ok: false, error: "translation-failed" });
   }
 
-  async function translateTweet({ id, url, csrfToken, dstLang = "zh", text = "" } = {}) {
+  async function translateTweet({ id, url, csrfToken, dstLang = "zh", text = "", contentType = "" } = {}) {
     const urlStatusId = getStatusIdFromUrl(url);
     if (!id || !urlStatusId || urlStatusId !== id) {
       return { ok: false, error: "invalid-tweet-metadata" };
@@ -526,7 +549,7 @@ export function createBackgroundController(chromeApi, options = {}) {
       const abortController = createAbortController();
       try {
         const result = await withTimeout(
-          translateWithProviders({ id, csrfToken, dstLang, text, signal: abortController?.signal }),
+          translateByContentType({ id, csrfToken, dstLang, text, contentType, signal: abortController?.signal }),
           translationTimeoutMs,
           "translation-request-timeout",
           () => abortController?.abort(),

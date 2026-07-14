@@ -254,6 +254,7 @@
   var TRANSLATION_RETRY_DELAY_MS = 700;
   var TRANSLATION_ENDPOINT = "https://api.x.com/2/grok/translation.json";
   var X_WEB_BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
+  var LONGFORM_CONTENT_TYPE = "longform";
   var STAT_COUNTERS = {
     expanded: "expanded",
     "translation-requested": "requested",
@@ -512,6 +513,22 @@
       }, ...await createThirdPartyProviderAdapters()];
       return createTranslationPipeline(providers).translate(request);
     }
+    async function translateWithThirdPartyProviders(request) {
+      if (configuredTranslationPipeline) {
+        return configuredTranslationPipeline.translate(request);
+      }
+      const providers = await createThirdPartyProviderAdapters();
+      if (providers.length === 0) {
+        return { ok: false, error: "third-party-provider-unavailable" };
+      }
+      return createTranslationPipeline(providers).translate(request);
+    }
+    async function translateByContentType(request) {
+      if (request?.contentType === LONGFORM_CONTENT_TYPE) {
+        return translateWithThirdPartyProviders(request);
+      }
+      return translateWithProviders(request);
+    }
     async function waitForRetryDelay(ms, signal) {
       if (signal?.aborted) {
         return false;
@@ -669,7 +686,7 @@
       }
       return removeInternalRetryFields(lastResult || { ok: false, error: "translation-failed" });
     }
-    async function translateTweet({ id, url, csrfToken, dstLang = "zh", text = "" } = {}) {
+    async function translateTweet({ id, url, csrfToken, dstLang = "zh", text = "", contentType = "" } = {}) {
       const urlStatusId = getStatusIdFromUrl(url);
       if (!id || !urlStatusId || urlStatusId !== id) {
         return { ok: false, error: "invalid-tweet-metadata" };
@@ -685,7 +702,7 @@
         const abortController = createAbortController();
         try {
           const result = await withTimeout(
-            translateWithProviders({ id, csrfToken, dstLang, text, signal: abortController?.signal }),
+            translateByContentType({ id, csrfToken, dstLang, text, contentType, signal: abortController?.signal }),
             translationTimeoutMs,
             "translation-request-timeout",
             () => abortController?.abort()
