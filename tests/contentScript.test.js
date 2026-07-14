@@ -46,7 +46,7 @@ function setupDom(url, html) {
   globalThis.chrome = {
     runtime: {
       lastError: null,
-      getManifest: () => ({ version: "0.1.1" }),
+      getManifest: () => ({ version: "0.2.0" }),
       sendMessage(message, callback) {
         sentMessages.push(message);
         callback?.({ ok: true });

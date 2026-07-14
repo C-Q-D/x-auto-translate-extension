@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "X Auto Expand Translate",
-  "version": "0.1.1",
-  "description": "Automatically expands X posts and triggers X's built-in translation.",
+  "version": "0.2.0",
+  "description": "Automatically expands X posts and falls back to Tencent Cloud translation when X is limited.",
   "background": {
     "service_worker": "dist/background.js"
   },
@@ -26,7 +26,8 @@
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
-    "https://api.x.com/*"
+    "https://api.x.com/*",
+    "https://tmt.tencentcloudapi.com/*"
   ],
   "action": {
     "default_title": "X Auto Translate",

@@ -1,36 +1,52 @@
 # X Auto Expand Translate
 
-Chrome extension for X web pages. It expands folded timeline posts, calls X Web's own Grok translation endpoint with the signed-in browser session, and replaces the timeline post body with the returned Chinese translation.
+Chrome 扩展：自动展开 X 帖子，优先调用 X Web 自带翻译；X 在重试后仍出现限流或临时故障时，可降级到已配置的腾讯云机器翻译。
 
-## Install locally
-
-Run:
+## 本地安装
 
 ```powershell
 npm install
 npm run build
 ```
 
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Click Load unpacked.
-4. Select this folder: `E:\workbench\x-auto-translate-extension`.
-5. Open or reload `https://x.com`.
-6. Open the extension popup on the X tab. It should show version `0.1.1` and a page status.
+1. 打开 `chrome://extensions`。
+2. 开启“开发者模式”，选择“加载已解压的扩展程序”。
+3. 选择本项目目录。
+4. 打开或刷新 `https://x.com`。
+5. 打开扩展弹窗，确认版本为 `0.2.0`。
 
-## Behavior
+升级旧版本后需要在扩展管理页重新加载，以授予腾讯云 API 域名权限。
 
-- Finds tweets with `article[data-testid="tweet"]`.
-- Clicks `button[data-testid="tweet-text-show-more-link"]` before translation.
-- Waits briefly for the full post text to appear.
-- Extracts the tweet status URL from links like `/user/status/123`.
-- Sends the tweet id to `https://api.x.com/2/grok/translation.json` with X Web headers, the page `ct0` CSRF token, and `dst_lang: "zh"`.
-- Uses `result.text` from the response as the translation.
-- Replaces `[data-testid="tweetText"]` with the translated text and keeps the original text only in an internal `data-xat-original-text` attribute.
-- Skips posts when X returns an empty translation.
-- Persists successful translations and skipped post ids in local extension storage so service worker restarts do not immediately request the same translations. Successful translations expire after 7 days; skipped entries expire after 6 hours so temporary X API misses can be retried.
-- Processes only tweets near the viewport and marks each tweet to avoid repeated work.
-- The extension popup shows diagnostic counters for expanded, requested, translated, skipped, failed attempts, and the loaded extension version.
-- The popup can detect the current X tab. If the content script is missing after an extension reload, it attempts to inject it into the current X page and then shows article, translation, and show-more counts.
+## 配置腾讯云
 
-The extension does not send post text to any third-party translation API. It relies on the logged-in X Web session and X's own translation API. If X changes required headers, the popup diagnostics should show `translation-http-*` or another short error so the request strategy can be adjusted.
+1. 在腾讯云控制台开通机器翻译，并创建仅具备机器翻译调用权限的子账号密钥。
+2. 在扩展弹窗填写 `SecretId`、`SecretKey` 和地域，点击“保存”。
+3. 点击“测试”；出现测试译文即表示签名、权限和服务状态正常。
+4. 不再使用时点击“删除”。
+
+凭证保存在当前 Chrome 配置的扩展本地存储中，不会返回给 X 页面脚本，但它不是系统级加密保险库。请勿使用主账号密钥，并在腾讯云侧关闭不需要的后付费能力、设置额度告警。扩展不会代替云平台阻止超额计费。
+
+## 翻译顺序
+
+1. X Web 翻译接口先执行，最多重试 3 次。
+2. X 返回 `408`、`425`、`429`、`5xx`，或发生网络/响应解析临时故障时，进入下一提供商。
+3. 已配置腾讯云时，将展开后的帖子正文发送给腾讯云 `TextTranslate`。
+4. X 的 `403`、元数据错误和空译文等终止结果不会触发腾讯云。
+5. 成功译文缓存 7 天，并记录实际提供商；跳过结果缓存 6 小时。
+
+未配置腾讯云时，行为与旧版本一致：X 临时故障会直接返回失败，不会向第三方发送正文。
+
+## 扩展方式
+
+- `src/providers/`：每个翻译厂商一个 Provider Adapter，负责签名、请求和错误归类。
+- `src/translationPipeline.js`：按顺序执行提供商，只在 Provider 明确返回 `fallback` 时继续。
+- `src/background.js`：读取本地配置并组装提供商顺序，不包含各厂商协议细节。
+
+后续接入 Azure、阿里云、百度、Google 或 DeepL 时，新增 Provider 并加入顺序即可，无需把厂商判断散落到帖子处理代码中。
+
+## 验证
+
+```powershell
+npm test
+npm run build
+```

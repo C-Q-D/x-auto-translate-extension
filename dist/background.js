@@ -303,7 +303,8 @@
     if (typeof entry === "object" && typeof entry.value === "string") {
       return {
         value: entry.value,
-        updatedAt: Number(entry.updatedAt || 0)
+        updatedAt: Number(entry.updatedAt || 0),
+        ...entry.provider ? { provider: entry.provider } : {}
       };
     }
     return null;
@@ -319,6 +320,16 @@
   }
   function isRetryableHttpStatus(status) {
     return status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+  function shouldFallbackFromX(result) {
+    if (!result || result.ok || result.skipped) {
+      return false;
+    }
+    return [
+      "translation-fetch-failed",
+      "translation-json-parse-failed",
+      "translation-json-read-failed"
+    ].includes(result.error) || /^translation-http-(408|425|429|5\d\d)$/.test(result.error || "");
   }
   function removeInternalRetryFields(result) {
     if (!result || typeof result !== "object") {
@@ -391,12 +402,7 @@
     const inFlight = /* @__PURE__ */ new Map();
     const cache = /* @__PURE__ */ new Map();
     const skipCache = /* @__PURE__ */ new Map();
-    const translationPipeline = createTranslationPipeline(options.translationProviders || [
-      {
-        id: "x",
-        translate: requestTranslationFromApi
-      }
-    ]);
+    const configuredTranslationPipeline = options.translationProviders ? createTranslationPipeline(options.translationProviders) : null;
     async function getProviderSettings() {
       if (!chromeApi.storage?.local) {
         return {};
@@ -469,6 +475,39 @@
         ...result?.providerCode ? { providerCode: result.providerCode } : {}
       };
     }
+    async function translateWithProviders(request) {
+      if (configuredTranslationPipeline) {
+        return configuredTranslationPipeline.translate(request);
+      }
+      const providers = [{
+        id: "x",
+        async translate(providerRequest) {
+          const result = await requestTranslationFromApi(providerRequest);
+          const normalizedResult = result?.ok ? { ...result, provider: "x" } : result;
+          return shouldFallbackFromX(normalizedResult) ? { ...normalizedResult, fallback: true } : normalizedResult;
+        }
+      }];
+      const tencentConfig = (await getProviderSettings()).tencent;
+      if (tencentConfig?.secretId && tencentConfig?.secretKey) {
+        const tencentProvider = tencentProviderFactory({
+          ...tencentConfig,
+          fetch: fetchApi,
+          crypto: options.crypto || globalThis.crypto,
+          now
+        });
+        providers.push({
+          id: tencentProvider.id || "tencent",
+          translate(providerRequest) {
+            return tencentProvider.translate({
+              ...providerRequest,
+              sourceLanguage: "auto",
+              targetLanguage: providerRequest.dstLang || "zh"
+            });
+          }
+        });
+      }
+      return createTranslationPipeline(providers).translate(request);
+    }
     async function waitForRetryDelay(ms, signal) {
       if (signal?.aborted) {
         return false;
@@ -501,7 +540,12 @@
     async function readCachedResult(id) {
       const memoryTranslation = cache.get(id);
       if (isFreshCacheEntry(memoryTranslation, translationCacheTtlMs, now())) {
-        return { ok: true, translation: memoryTranslation.value, cached: true };
+        return {
+          ok: true,
+          translation: memoryTranslation.value,
+          ...memoryTranslation.provider ? { provider: memoryTranslation.provider } : {},
+          cached: true
+        };
       }
       if (memoryTranslation) {
         cache.delete(id);
@@ -517,7 +561,12 @@
       const translationEntry = normalizeCacheEntry(persistent.translations[id]);
       if (isFreshCacheEntry(translationEntry, translationCacheTtlMs, now())) {
         cache.set(id, translationEntry);
-        return { ok: true, translation: translationEntry.value, cached: true };
+        return {
+          ok: true,
+          translation: translationEntry.value,
+          ...translationEntry.provider ? { provider: translationEntry.provider } : {},
+          cached: true
+        };
       }
       const skippedEntry = normalizeCacheEntry(persistent.skipped[id]);
       if (isFreshCacheEntry(skippedEntry, skipCacheTtlMs, now())) {
@@ -534,7 +583,11 @@
       const translations = { ...persistent.translations };
       const skipped = { ...persistent.skipped };
       if (result.ok && result.translation) {
-        translations[id] = { value: result.translation, updatedAt: now() };
+        translations[id] = {
+          value: result.translation,
+          updatedAt: now(),
+          ...result.provider ? { provider: result.provider } : {}
+        };
         delete skipped[id];
       } else if (result.skipped) {
         skipped[id] = { value: result.error || "translation-skipped", updatedAt: now() };
@@ -612,7 +665,7 @@
       }
       return removeInternalRetryFields(lastResult || { ok: false, error: "translation-failed" });
     }
-    async function translateTweet({ id, url, csrfToken, dstLang = "zh" } = {}) {
+    async function translateTweet({ id, url, csrfToken, dstLang = "zh", text = "" } = {}) {
       const urlStatusId = getStatusIdFromUrl(url);
       if (!id || !urlStatusId || urlStatusId !== id) {
         return { ok: false, error: "invalid-tweet-metadata" };
@@ -628,13 +681,17 @@
         const abortController = createAbortController();
         try {
           const result = await withTimeout(
-            translationPipeline.translate({ id, csrfToken, dstLang, signal: abortController?.signal }),
+            translateWithProviders({ id, csrfToken, dstLang, text, signal: abortController?.signal }),
             translationTimeoutMs,
             "translation-request-timeout",
             () => abortController?.abort()
           );
           if (result?.ok && result.translation) {
-            cache.set(id, { value: result.translation, updatedAt: now() });
+            cache.set(id, {
+              value: result.translation,
+              updatedAt: now(),
+              ...result.provider ? { provider: result.provider } : {}
+            });
             await writeCachedResult(id, result);
           } else if (result?.skipped) {
             skipCache.set(id, { value: result?.error || "translation-skipped", updatedAt: now() });

@@ -9,6 +9,7 @@ const METADATA = {
   url: `https://x.com/openai/status/${TWEET_ID}`,
   csrfToken: "csrf-token",
   dstLang: "zh",
+  text: "Hello from X",
 };
 
 function createChromeMock({ initialStorage = {} } = {}) {
@@ -82,7 +83,7 @@ test("background calls X Grok translation API and returns result text", async ()
 
   const result = await controller.translateTweet(METADATA);
 
-  assert.deepEqual(result, { ok: true, translation: "你好" });
+  assert.deepEqual(result, { ok: true, translation: "你好", provider: "x" });
   assert.equal(fetchCalls.length, 1);
   const [url, options] = fetchCalls[0];
   assert.equal(url, "https://api.x.com/2/grok/translation.json");
@@ -154,16 +155,35 @@ test("background rejects direct API translation without a csrf token", async () 
 });
 
 test("background returns failure for non-2xx translation API responses", async () => {
-  const { chrome, storage } = createChromeMock();
+  const { chrome, storage } = createChromeMock({
+    initialStorage: {
+      xatProviderSettings: {
+        tencent: { secretId: "AKIDEXAMPLE", secretKey: "example-secret" },
+      },
+    },
+  });
   const { fetchApi, calls: fetchCalls } = createFetchMock({
     responses: [createFetchResponse(403, { errors: [{ message: "Forbidden" }] })],
   });
-  const controller = createBackgroundController(chrome, { fetch: fetchApi });
+  let tencentCalls = 0;
+  const controller = createBackgroundController(chrome, {
+    fetch: fetchApi,
+    tencentProviderFactory() {
+      return {
+        id: "tencent",
+        async translate() {
+          tencentCalls += 1;
+          return { ok: true, translation: "不应调用", provider: "tencent" };
+        },
+      };
+    },
+  });
 
   const result = await controller.translateTweet(METADATA);
 
   assert.deepEqual(result, { ok: false, error: "translation-http-403" });
   assert.equal(fetchCalls.length, 1);
+  assert.equal(tencentCalls, 0);
   assert.equal(storage.xatStats.failed, 1);
   assert.equal(storage.xatStats.lastEvent, "background-translation-failed");
   assert.equal(storage.xatStats.lastError, "translation-http-403");
@@ -202,7 +222,7 @@ test("background retries malformed translation JSON before returning a later suc
 
   const result = await controller.translateTweet(METADATA);
 
-  assert.deepEqual(result, { ok: true, translation: "重试后的译文" });
+  assert.deepEqual(result, { ok: true, translation: "重试后的译文", provider: "x" });
   assert.equal(fetchCalls.length, 2);
   assert.equal(storage.xatTranslationCache.translations[TWEET_ID].value, "重试后的译文");
   assert.equal(storage.xatStats?.failed || 0, 0);
@@ -263,8 +283,8 @@ test("background restores translated cache from storage after controller restart
   const secondController = createBackgroundController(chrome, { fetch: fetchApi, now: () => 123456 });
   const second = await secondController.translateTweet(METADATA);
 
-  assert.deepEqual(first, { ok: true, translation: "你好" });
-  assert.deepEqual(second, { ok: true, translation: "你好", cached: true });
+  assert.deepEqual(first, { ok: true, translation: "你好", provider: "x" });
+  assert.deepEqual(second, { ok: true, translation: "你好", provider: "x", cached: true });
   assert.equal(fetchCalls.length, 1);
   assert.equal(storage.xatTranslationCache.translations[TWEET_ID].updatedAt, 123456);
 });
@@ -333,7 +353,7 @@ test("background retries expired translation cache entries", async () => {
 
   const result = await controller.translateTweet(METADATA);
 
-  assert.deepEqual(result, { ok: true, translation: "新译文" });
+  assert.deepEqual(result, { ok: true, translation: "新译文", provider: "x" });
   assert.equal(fetchCalls.length, 1);
   assert.equal(storage.xatTranslationCache.translations[TWEET_ID].value, "新译文");
 });
@@ -353,8 +373,8 @@ test("background expires in-memory translation cache entries", async () => {
   currentTime += 7 * 24 * 60 * 60 * 1000 + 1;
   const second = await controller.translateTweet(METADATA);
 
-  assert.deepEqual(first, { ok: true, translation: "译文A" });
-  assert.deepEqual(second, { ok: true, translation: "译文B" });
+  assert.deepEqual(first, { ok: true, translation: "译文A", provider: "x" });
+  assert.deepEqual(second, { ok: true, translation: "译文B", provider: "x" });
   assert.equal(fetchCalls.length, 2);
 });
 
@@ -381,8 +401,8 @@ test("background deduplicates in-flight requests by tweet id", async () => {
   resolveFetch();
   const [first, second] = await Promise.all([firstPromise, secondPromise]);
 
-  assert.deepEqual(first, { ok: true, translation: "同一个译文" });
-  assert.deepEqual(second, { ok: true, translation: "同一个译文" });
+  assert.deepEqual(first, { ok: true, translation: "同一个译文", provider: "x" });
+  assert.deepEqual(second, { ok: true, translation: "同一个译文", provider: "x" });
   assert.equal(fetchCalls.length, 1);
 });
 
@@ -426,6 +446,84 @@ test("background counts longform unsupported diagnostics as skipped", async () =
   assert.equal(storage.xatStats.skipped, 1);
   assert.equal(storage.xatStats.lastEvent, "longform-unsupported");
   assert.equal(storage.xatStats.lastTweetId, "2071912657133973977");
+});
+
+test("background falls back from repeated X rate limits to configured Tencent translation", async () => {
+  const { chrome, storage } = createChromeMock({
+    initialStorage: {
+      xatProviderSettings: {
+        tencent: {
+          secretId: "AKIDEXAMPLE",
+          secretKey: "example-secret",
+          region: "ap-guangzhou",
+        },
+      },
+    },
+  });
+  const { fetchApi, calls: fetchCalls } = createFetchMock({
+    responses: [createFetchResponse(429, { errors: [{ message: "Rate limited" }] })],
+  });
+  const tencentCalls = [];
+  const providerConfigs = [];
+  const controller = createBackgroundController(chrome, {
+    fetch: fetchApi,
+    translationRetryAttempts: 2,
+    wait: async () => {},
+    now: () => 1710000000000,
+    tencentProviderFactory(config) {
+      providerConfigs.push(config);
+      return {
+        id: "tencent",
+        async translate(request) {
+          tencentCalls.push(request);
+          return { ok: true, translation: "来自腾讯云的译文", provider: "tencent" };
+        },
+      };
+    },
+  });
+
+  const first = await controller.translateTweet(METADATA);
+  const second = await createBackgroundController(chrome, {
+    fetch: fetchApi,
+    now: () => 1710000000000,
+    tencentProviderFactory() {
+      throw new Error("cached translations must not recreate providers");
+    },
+  }).translateTweet(METADATA);
+
+  assert.deepEqual(first, { ok: true, translation: "来自腾讯云的译文", provider: "tencent" });
+  assert.deepEqual(second, {
+    ok: true,
+    translation: "来自腾讯云的译文",
+    provider: "tencent",
+    cached: true,
+  });
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(providerConfigs[0].region, "ap-guangzhou");
+  assert.equal(providerConfigs[0].secretId, "AKIDEXAMPLE");
+  assert.equal(providerConfigs[0].secretKey, "example-secret");
+  assert.equal(tencentCalls.length, 1);
+  assert.equal(tencentCalls[0].text, "Hello from X");
+  assert.equal(tencentCalls[0].sourceLanguage, "auto");
+  assert.equal(tencentCalls[0].targetLanguage, "zh");
+  assert.equal(storage.xatTranslationCache.translations[TWEET_ID].provider, "tencent");
+});
+
+test("background preserves the X rate-limit error when Tencent is not configured", async () => {
+  const { chrome } = createChromeMock();
+  const { fetchApi, calls: fetchCalls } = createFetchMock({
+    responses: [createFetchResponse(429, { errors: [{ message: "Rate limited" }] })],
+  });
+  const controller = createBackgroundController(chrome, {
+    fetch: fetchApi,
+    translationRetryAttempts: 2,
+    wait: async () => {},
+  });
+
+  const result = await controller.translateTweet(METADATA);
+
+  assert.deepEqual(result, { ok: false, error: "translation-http-429" });
+  assert.equal(fetchCalls.length, 2);
 });
 
 test("background saves Tencent credentials without exposing them in status", async () => {

@@ -16,7 +16,7 @@ test("popup saves, tests, and deletes Tencent credentials through the background
   const chromeMock = {
     runtime: {
       lastError: null,
-      getManifest: () => ({ version: "0.1.1" }),
+      getManifest: () => ({ version: "0.2.0" }),
       sendMessage(message, callback) {
         messages.push(message);
         const responses = {
@@ -52,7 +52,7 @@ test("popup saves, tests, and deletes Tencent credentials through the background
           translationCount: 0,
           showMoreCount: 0,
           states: {},
-          version: "0.1.1",
+          version: "0.2.0",
         });
       },
     },
