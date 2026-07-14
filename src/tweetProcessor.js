@@ -91,6 +91,29 @@ export function findTweetArticles(root = document) {
   return [...tweets, ...standaloneLongforms];
 }
 
+/**
+ * 根据 DOM 变化节点找到应该重新处理的最外层目标。
+ *
+ * @param {Node | Element | null | undefined} node MutationObserver 捕获到的变化节点或其父节点。
+ * @returns {Element | null} 返回普通帖子 article 或独立 X Article 长文容器；找不到可处理目标时返回 null。
+ * @sideEffects 本函数只读取 DOM，不修改节点状态。
+ */
+export function findProcessTargetFromNode(node) {
+  const element = node?.nodeType === 1 ? node : node?.parentElement;
+  if (!element) {
+    return null;
+  }
+
+  // X Article 详情页会先渲染独立长文容器，再逐步把 Draft 富文本正文塞进去；
+  // 这里把容器内部任意变化都归并到最外层长文块，便于内容脚本重新调度。
+  const standaloneLongform = element.closest?.(LONGFORM_READ_VIEW_SELECTOR);
+  if (standaloneLongform && !standaloneLongform.closest?.('article[data-testid="tweet"]')) {
+    return standaloneLongform;
+  }
+
+  return element.closest?.('article[data-testid="tweet"]') || null;
+}
+
 export function shouldProcessTimelinePage(url) {
   try {
     const parsed = new URL(url);
@@ -211,8 +234,11 @@ export function extractTweetText(tweet) {
 }
 
 function createTranslationRequestPayload(tweet, metadata, expandedText) {
-  const longformText = isLongformTweet(tweet) ? extractLongformText(tweet) : "";
-  if (longformText) {
+  if (isLongformTweet(tweet)) {
+    const longformText = extractLongformText(tweet);
+    if (!longformText) {
+      return null;
+    }
     return {
       ...metadata,
       contentType: LONGFORM_CONTENT_TYPE,
@@ -456,8 +482,18 @@ export function createTweetProcessor(options = {}) {
       }
 
       renderTranslationStatus(tweet, isLongformTweet(tweet) ? "正在获取长文译文..." : "正在获取 X 自带译文...");
+      const payload = createTranslationRequestPayload(tweet, metadata, expandedText);
+      if (!payload) {
+        // 长文页面经常先出现外壳再异步填充正文；空正文不能交给后台，否则会消耗一次无效请求并进入失败态。
+        renderTranslationStatus(tweet, "正在等待长文正文加载...");
+        tweet.dataset.xatState = "expanded";
+        tweet.dataset.xatLastAttempt = String(now());
+        onEvent("translation-waiting-content", metadata);
+        return;
+      }
+
       onEvent("translation-requested", metadata);
-      const result = await config.requestTranslation(createTranslationRequestPayload(tweet, metadata, expandedText));
+      const result = await config.requestTranslation(payload);
       const currentMetadata = getTweetMetadata(tweet);
       if (!tweet.isConnected) {
         tweet.querySelector("[data-xat-status]")?.remove();

@@ -1,4 +1,4 @@
-import { createTweetProcessor, findTweetArticles, shouldProcessTimelinePage } from "./tweetProcessor.js";
+import { createTweetProcessor, findProcessTargetFromNode, findTweetArticles, shouldProcessTimelinePage } from "./tweetProcessor.js";
 import { sendRuntimeMessage } from "./runtimeMessaging.js";
 
 const DEFAULT_SETTINGS = {
@@ -167,9 +167,11 @@ if (globalThis.__xatContentScriptLoaded) {
         }
       }
 
-      const changedTweet = mutation.target?.closest?.('article[data-testid="tweet"]');
-      if (changedTweet && changedTweet.dataset.xatState === "expanded") {
-        scheduleTweet(changedTweet);
+      const changedTarget = findProcessTargetFromNode(mutation.target);
+      if (changedTarget && changedTarget.dataset.xatState === "expanded") {
+        // 独立 X Article 正文可能在外壳处理失败后才 hydrate；DOM 变化说明内容已有机会变完整，需绕过短冷却。
+        delete changedTarget.dataset.xatLastAttempt;
+        scheduleTweet(changedTarget);
       }
     }
   });

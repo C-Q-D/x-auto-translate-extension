@@ -8,6 +8,7 @@ import {
   createTweetProcessor,
   extractLongformText,
   extractTweetText,
+  findProcessTargetFromNode,
   findTweetArticles,
   findShowMoreButton,
   findTranslateButton,
@@ -513,6 +514,80 @@ test("processor translates standalone X Article rich text view using status URL 
   ]);
   assert.equal(readView.dataset.xatState, "translated");
   assert.equal(readView.parentElement.querySelector("[data-xat-longform-translation]").textContent, "独立长文译文");
+});
+
+test("processor waits for standalone X Article rich text body before requesting translation", async () => {
+  const dom = setupDom(`
+    <main>
+      <div data-testid="twitterArticleRichTextView">
+        <div class="DraftEditor-root">
+          <div data-testid="longformRichTextComponent" contenteditable="false"></div>
+        </div>
+      </div>
+    </main>
+  `);
+  dom.reconfigure({ url: "https://x.com/0xwhrrari/status/2071337983899271175" });
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  const body = document.querySelector("[data-testid='longformRichTextComponent']");
+  const requests = [];
+  const events = [];
+  let now = 1000;
+
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => now,
+    onEvent: (event, payload) => events.push([event, payload]),
+    requestTranslation: async (metadata) => {
+      requests.push(metadata);
+      return { ok: true, translation: "正文加载后的译文", provider: "tencent" };
+    },
+  });
+
+  await processor.processTweet(readView);
+
+  assert.deepEqual(requests, []);
+  assert.equal(readView.dataset.xatState, "expanded");
+  assert.equal(readView.parentElement.querySelector("[data-xat-status]").textContent, "正在等待长文正文加载...");
+  assert.deepEqual(events.map(([event]) => event), ["translation-waiting-content"]);
+
+  body.innerHTML = `
+    <div data-contents="true">
+      <div class="longform-unstyled" data-block="true">
+        <span data-text="true">Hydrated article body.</span>
+      </div>
+    </div>
+  `;
+  delete readView.dataset.xatLastAttempt;
+  now = 9000;
+  await processor.processTweet(readView);
+
+  assert.deepEqual(requests, [
+    {
+      id: "2071337983899271175",
+      url: "https://x.com/0xwhrrari/status/2071337983899271175",
+      contentType: "longform",
+      text: "Hydrated article body.",
+    },
+  ]);
+  assert.equal(readView.dataset.xatState, "translated");
+  assert.equal(readView.parentElement.querySelector("[data-xat-longform-translation]").textContent, "正文加载后的译文");
+});
+
+test("maps rich text mutations inside standalone X Article back to the article read view", () => {
+  setupDom(`
+    <main>
+      <div data-testid="twitterArticleRichTextView">
+        <div data-testid="longformRichTextComponent">
+          <span data-text="true">Hydrated article body.</span>
+        </div>
+      </div>
+    </main>
+  `);
+
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  const textNode = document.querySelector("[data-text='true']");
+  assert.equal(findProcessTargetFromNode(textNode), readView);
+  assert.equal(findProcessTargetFromNode(textNode.firstChild), readView);
 });
 
 test("processor requests translation for X Article longform text", async () => {

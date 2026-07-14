@@ -72,6 +72,17 @@
     const standaloneLongforms = longformRoots.filter((readView) => !readView.closest?.('article[data-testid="tweet"]'));
     return [...tweets, ...standaloneLongforms];
   }
+  function findProcessTargetFromNode(node) {
+    const element = node?.nodeType === 1 ? node : node?.parentElement;
+    if (!element) {
+      return null;
+    }
+    const standaloneLongform = element.closest?.(LONGFORM_READ_VIEW_SELECTOR);
+    if (standaloneLongform && !standaloneLongform.closest?.('article[data-testid="tweet"]')) {
+      return standaloneLongform;
+    }
+    return element.closest?.('article[data-testid="tweet"]') || null;
+  }
   function shouldProcessTimelinePage(url) {
     try {
       const parsed = new URL(url);
@@ -164,8 +175,11 @@
     return textOf(tweetText);
   }
   function createTranslationRequestPayload(tweet, metadata, expandedText) {
-    const longformText = isLongformTweet(tweet) ? extractLongformText(tweet) : "";
-    if (longformText) {
+    if (isLongformTweet(tweet)) {
+      const longformText = extractLongformText(tweet);
+      if (!longformText) {
+        return null;
+      }
       return {
         ...metadata,
         contentType: LONGFORM_CONTENT_TYPE,
@@ -356,8 +370,16 @@
           return;
         }
         renderTranslationStatus(tweet, isLongformTweet(tweet) ? "\u6B63\u5728\u83B7\u53D6\u957F\u6587\u8BD1\u6587..." : "\u6B63\u5728\u83B7\u53D6 X \u81EA\u5E26\u8BD1\u6587...");
+        const payload = createTranslationRequestPayload(tweet, metadata, expandedText);
+        if (!payload) {
+          renderTranslationStatus(tweet, "\u6B63\u5728\u7B49\u5F85\u957F\u6587\u6B63\u6587\u52A0\u8F7D...");
+          tweet.dataset.xatState = "expanded";
+          tweet.dataset.xatLastAttempt = String(now());
+          onEvent("translation-waiting-content", metadata);
+          return;
+        }
         onEvent("translation-requested", metadata);
-        const result = await config.requestTranslation(createTranslationRequestPayload(tweet, metadata, expandedText));
+        const result = await config.requestTranslation(payload);
         const currentMetadata = getTweetMetadata(tweet);
         if (!tweet.isConnected) {
           tweet.querySelector("[data-xat-status]")?.remove();
@@ -578,9 +600,10 @@
             scan(node);
           }
         }
-        const changedTweet = mutation.target?.closest?.('article[data-testid="tweet"]');
-        if (changedTweet && changedTweet.dataset.xatState === "expanded") {
-          scheduleTweet(changedTweet);
+        const changedTarget = findProcessTargetFromNode(mutation.target);
+        if (changedTarget && changedTarget.dataset.xatState === "expanded") {
+          delete changedTarget.dataset.xatLastAttempt;
+          scheduleTweet(changedTarget);
         }
       }
     });

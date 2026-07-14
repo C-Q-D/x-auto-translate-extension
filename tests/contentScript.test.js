@@ -45,6 +45,9 @@ function setupDom(url, html) {
   globalThis.HTMLElement = dom.window.HTMLElement;
   globalThis.MutationObserver = dom.window.MutationObserver;
   globalThis.IntersectionObserver = FakeIntersectionObserver;
+  // 内容脚本和处理器都通过 globalThis 读定时器；测试中必须把全局定时器切到当前 JSDOM，避免上个用例的异步任务污染下个用例。
+  globalThis.setTimeout = dom.window.setTimeout;
+  globalThis.clearTimeout = dom.window.clearTimeout;
   globalThis.chrome = {
     runtime: {
       lastError: null,
@@ -216,6 +219,58 @@ test("content script observes standalone X Article read views on status pages", 
     url: "https://x.com/0xwhrrari/status/2071337983899271175",
     contentType: "longform",
     text: "Emails. Reports. Formatting. Most knowledge workers spend time on necessary work.",
+    csrfToken: "csrf-token",
+    dstLang: "zh",
+  });
+  dom.window.close();
+});
+
+test("content script reschedules standalone X Article when rich text hydrates after the shell", async () => {
+  const { dom, observed, observers, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView">
+          <div class="DraftEditor-root">
+            <div data-testid="longformRichTextComponent" contenteditable="false"></div>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  const body = document.querySelector("[data-testid='longformRichTextComponent']");
+  observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
+  await flushMutations();
+  await wait(650);
+
+  assert.equal(sentMessages.some((entry) => entry.type === "XAT_TRANSLATE_TWEET"), false);
+  assert.equal(readView.dataset.xatState, "expanded");
+  assert.equal(readView.parentElement.querySelector("[data-xat-status]").textContent, "正在等待长文正文加载...");
+
+  body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div data-contents="true">
+        <div class="longform-unstyled" data-block="true">
+          <span data-text="true">Hydrated article body.</span>
+        </div>
+      </div>
+    `,
+  );
+  await flushMutations();
+  await wait(650);
+
+  const message = sentMessages.find((entry) => entry.type === "XAT_TRANSLATE_TWEET");
+  assert.deepEqual(message.payload, {
+    id: "2071337983899271175",
+    url: "https://x.com/0xwhrrari/status/2071337983899271175",
+    contentType: "longform",
+    text: "Hydrated article body.",
     csrfToken: "csrf-token",
     dstLang: "zh",
   });
