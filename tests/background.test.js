@@ -34,6 +34,9 @@ function createChromeMock({ initialStorage = {} } = {}) {
           calls.push(["storage.local.set", value]);
           Object.assign(storage, value);
         },
+        async setAccessLevel(value) {
+          calls.push(["storage.local.setAccessLevel", value]);
+        },
       },
     },
   };
@@ -423,4 +426,137 @@ test("background counts longform unsupported diagnostics as skipped", async () =
   assert.equal(storage.xatStats.skipped, 1);
   assert.equal(storage.xatStats.lastEvent, "longform-unsupported");
   assert.equal(storage.xatStats.lastTweetId, "2071912657133973977");
+});
+
+test("background saves Tencent credentials without exposing them in status", async () => {
+  const { chrome, storage } = createChromeMock();
+  const controller = createBackgroundController(chrome, { now: () => 1710000000000 });
+
+  const saved = await controller.saveTencentConfig({
+    secretId: "  AKIDEXAMPLE  ",
+    secretKey: "  example-secret  ",
+    region: " ap-shanghai ",
+  });
+  const status = await controller.getTencentConfigStatus();
+
+  assert.deepEqual(saved, { ok: true, configured: true, region: "ap-shanghai" });
+  assert.deepEqual(status, { ok: true, configured: true, region: "ap-shanghai" });
+  assert.deepEqual(storage.xatProviderSettings.tencent, {
+    secretId: "AKIDEXAMPLE",
+    secretKey: "example-secret",
+    region: "ap-shanghai",
+    updatedAt: "2024-03-09T16:00:00.000Z",
+  });
+  assert.equal("secretId" in status, false);
+  assert.equal("secretKey" in status, false);
+});
+
+test("background rejects incomplete Tencent credentials", async () => {
+  const { chrome, storage } = createChromeMock();
+  const controller = createBackgroundController(chrome);
+
+  const result = await controller.saveTencentConfig({ secretId: "AKIDEXAMPLE", secretKey: "" });
+
+  assert.deepEqual(result, { ok: false, error: "tencent-credentials-required" });
+  assert.equal(storage.xatProviderSettings, undefined);
+});
+
+test("background tests the saved Tencent configuration through its provider", async () => {
+  const { chrome } = createChromeMock({
+    initialStorage: {
+      xatProviderSettings: {
+        tencent: {
+          secretId: "AKIDEXAMPLE",
+          secretKey: "example-secret",
+          region: "ap-guangzhou",
+        },
+      },
+    },
+  });
+  const factoryCalls = [];
+  const translateCalls = [];
+  const controller = createBackgroundController(chrome, {
+    tencentProviderFactory(config) {
+      factoryCalls.push(config);
+      return {
+        async translate(request) {
+          translateCalls.push(request);
+          return { ok: true, translation: "你好，腾讯云。", provider: "tencent" };
+        },
+      };
+    },
+  });
+
+  const result = await controller.testTencentConfig();
+
+  assert.deepEqual(result, { ok: true, translation: "你好，腾讯云。", provider: "tencent" });
+  assert.equal(factoryCalls.length, 1);
+  assert.equal(factoryCalls[0].secretId, "AKIDEXAMPLE");
+  assert.equal(factoryCalls[0].secretKey, "example-secret");
+  assert.deepEqual(translateCalls, [{
+    text: "Hello, Tencent Cloud.",
+    sourceLanguage: "en",
+    targetLanguage: "zh",
+  }]);
+});
+
+test("background deletes only the Tencent provider configuration", async () => {
+  const { chrome, storage } = createChromeMock({
+    initialStorage: {
+      xatProviderSettings: {
+        tencent: { secretId: "AKIDEXAMPLE", secretKey: "example-secret" },
+        futureProvider: { enabled: true },
+      },
+    },
+  });
+  const controller = createBackgroundController(chrome);
+
+  const result = await controller.deleteTencentConfig();
+
+  assert.deepEqual(result, { ok: true, configured: false, region: "ap-guangzhou" });
+  assert.deepEqual(storage.xatProviderSettings, { futureProvider: { enabled: true } });
+});
+
+test("background rejects provider configuration messages from page content scripts", () => {
+  const { chrome, listeners } = createChromeMock();
+  const controller = createBackgroundController(chrome);
+  controller.registerMessageListener();
+  const responses = [];
+
+  const asynchronous = listeners[0](
+    { type: "XAT_TENCENT_CONFIG_STATUS" },
+    { tab: { id: 1 } },
+    (response) => responses.push(response),
+  );
+
+  assert.equal(asynchronous, false);
+  assert.deepEqual(responses, [{ ok: false, error: "untrusted-config-sender" }]);
+});
+
+test("background handles trusted Tencent configuration messages and restricts storage access", async () => {
+  const { chrome, calls, listeners } = createChromeMock();
+  const controller = createBackgroundController(chrome, { now: () => 1710000000000 });
+  controller.registerMessageListener();
+
+  const saveResponse = await new Promise((resolve) => {
+    const asynchronous = listeners[0]({
+      type: "XAT_TENCENT_CONFIG_SAVE",
+      payload: {
+        secretId: "AKIDEXAMPLE",
+        secretKey: "example-secret",
+        region: "ap-guangzhou",
+      },
+    }, {}, resolve);
+    assert.equal(asynchronous, true);
+  });
+  const statusResponse = await new Promise((resolve) => {
+    listeners[0]({ type: "XAT_TENCENT_CONFIG_STATUS" }, {}, resolve);
+  });
+
+  assert.deepEqual(saveResponse, { ok: true, configured: true, region: "ap-guangzhou" });
+  assert.deepEqual(statusResponse, { ok: true, configured: true, region: "ap-guangzhou" });
+  assert.deepEqual(
+    calls.find(([name]) => name === "storage.local.setAccessLevel"),
+    ["storage.local.setAccessLevel", { accessLevel: "TRUSTED_CONTEXTS" }],
+  );
 });

@@ -33,10 +33,220 @@
     return { translate };
   }
 
+  // src/providers/tencentTranslationProvider.js
+  var TENCENT_ENDPOINT = "https://tmt.tencentcloudapi.com/";
+  var TENCENT_HOST = "tmt.tencentcloudapi.com";
+  var TENCENT_SERVICE = "tmt";
+  var TENCENT_ACTION = "TextTranslate";
+  var TENCENT_VERSION = "2018-03-21";
+  var TENCENT_ALGORITHM = "TC3-HMAC-SHA256";
+  var TENCENT_MAX_TEXT_LENGTH = 2e3;
+  var textEncoder = new TextEncoder();
+  function toHex(bytes) {
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  function toBytes(value) {
+    return typeof value === "string" ? textEncoder.encode(value) : value;
+  }
+  async function sha256Hex(cryptoApi, value) {
+    const digest = await cryptoApi.subtle.digest("SHA-256", toBytes(value));
+    return toHex(new Uint8Array(digest));
+  }
+  async function hmacSha256(cryptoApi, key, value) {
+    const cryptoKey = await cryptoApi.subtle.importKey(
+      "raw",
+      toBytes(key),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const signature = await cryptoApi.subtle.sign("HMAC", cryptoKey, toBytes(value));
+    return new Uint8Array(signature);
+  }
+  function codePointLength(value) {
+    return Array.from(value).length;
+  }
+  function createFailure(error, category, options = {}) {
+    return {
+      ok: false,
+      error,
+      category,
+      fallback: options.fallback ?? true,
+      retryable: options.retryable ?? false,
+      ...options.providerCode ? { providerCode: options.providerCode } : {}
+    };
+  }
+  function classifyTencentError(providerCode = "", httpStatus = 0) {
+    if (providerCode === "FailedOperation.NoFreeAmount") {
+      return createFailure("tencent-quota-exhausted", "quota_exhausted", { providerCode });
+    }
+    if (providerCode.startsWith("RequestLimitExceeded") || providerCode === "LimitExceeded.LimitedAccessFrequency" || httpStatus === 429) {
+      return createFailure("tencent-rate-limited", "rate_limited", {
+        providerCode,
+        retryable: true
+      });
+    }
+    if (providerCode.startsWith("AuthFailure") || providerCode.startsWith("UnauthorizedOperation")) {
+      return createFailure("tencent-auth-failed", "auth_failed", { providerCode });
+    }
+    if (providerCode === "FailedOperation.UserNotRegistered") {
+      return createFailure("tencent-service-not-enabled", "service_not_enabled", { providerCode });
+    }
+    if (providerCode === "FailedOperation.ServiceIsolate" || providerCode === "FailedOperation.StopUsing") {
+      return createFailure("tencent-billing-problem", "billing_problem", { providerCode });
+    }
+    if (providerCode.includes("Unsupported") && providerCode.includes("Language") || providerCode.includes("UnSupportedTargetLanguage") || providerCode === "FailedOperation.LanguageRecognitionErr") {
+      return createFailure("tencent-unsupported-language", "unsupported_language", { providerCode });
+    }
+    if (providerCode.startsWith("InvalidParameter") || providerCode === "UnsupportedOperation.TextTooLong" || httpStatus === 400) {
+      return createFailure("tencent-invalid-request", "invalid_request", {
+        providerCode,
+        fallback: false
+      });
+    }
+    if (providerCode.startsWith("InternalError") || providerCode === "ServiceUnavailable" || providerCode.startsWith("FailedOperation.Request") || httpStatus >= 500) {
+      return createFailure("tencent-temporary-failure", "temporary_failure", {
+        providerCode,
+        retryable: true
+      });
+    }
+    if (httpStatus === 401 || httpStatus === 403) {
+      return createFailure("tencent-auth-failed", "auth_failed", { providerCode });
+    }
+    return createFailure(
+      providerCode ? `tencent-${providerCode}` : `tencent-http-${httpStatus || 0}`,
+      "provider_failure",
+      { providerCode }
+    );
+  }
+  async function createAuthorization({ cryptoApi, secretId, secretKey, payload, timestamp }) {
+    const date = new Date(timestamp * 1e3).toISOString().slice(0, 10);
+    const canonicalHeaders = [
+      "content-type:application/json; charset=utf-8",
+      `host:${TENCENT_HOST}`,
+      `x-tc-action:${TENCENT_ACTION.toLowerCase()}`,
+      ""
+    ].join("\n");
+    const signedHeaders = "content-type;host;x-tc-action";
+    const canonicalRequest = [
+      "POST",
+      "/",
+      "",
+      canonicalHeaders,
+      signedHeaders,
+      await sha256Hex(cryptoApi, payload)
+    ].join("\n");
+    const credentialScope = `${date}/${TENCENT_SERVICE}/tc3_request`;
+    const stringToSign = [
+      TENCENT_ALGORITHM,
+      timestamp,
+      credentialScope,
+      await sha256Hex(cryptoApi, canonicalRequest)
+    ].join("\n");
+    const secretDate = await hmacSha256(cryptoApi, `TC3${secretKey}`, date);
+    const secretService = await hmacSha256(cryptoApi, secretDate, TENCENT_SERVICE);
+    const secretSigning = await hmacSha256(cryptoApi, secretService, "tc3_request");
+    const signature = toHex(await hmacSha256(cryptoApi, secretSigning, stringToSign));
+    return `${TENCENT_ALGORITHM} Credential=${secretId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  }
+  function createTencentTranslationProvider(config = {}) {
+    const fetchApi = config.fetch || globalThis.fetch?.bind(globalThis);
+    const cryptoApi = config.crypto || globalThis.crypto;
+    const now = config.now || (() => Date.now());
+    const region = config.region || "ap-guangzhou";
+    async function translate(request = {}) {
+      const text = typeof request.text === "string" ? request.text.trim() : "";
+      if (!text) {
+        return createFailure("tencent-text-required", "invalid_request", { fallback: false });
+      }
+      if (codePointLength(text) > TENCENT_MAX_TEXT_LENGTH) {
+        return createFailure("tencent-text-too-long", "invalid_request", { fallback: false });
+      }
+      if (!config.secretId || !config.secretKey) {
+        return createFailure("tencent-credentials-missing", "auth_failed");
+      }
+      if (!fetchApi) {
+        return createFailure("tencent-fetch-unavailable", "configuration_error");
+      }
+      if (!cryptoApi?.subtle) {
+        return createFailure("tencent-crypto-unavailable", "configuration_error");
+      }
+      const payload = JSON.stringify({
+        SourceText: text,
+        Source: request.sourceLanguage || "auto",
+        Target: request.targetLanguage || "zh",
+        ProjectId: 0
+      });
+      const timestamp = Math.floor(now() / 1e3);
+      const authorization = await createAuthorization({
+        cryptoApi,
+        secretId: config.secretId,
+        secretKey: config.secretKey,
+        payload,
+        timestamp
+      });
+      const headers = {
+        Authorization: authorization,
+        "Content-Type": "application/json; charset=utf-8",
+        "X-TC-Action": TENCENT_ACTION,
+        "X-TC-Version": TENCENT_VERSION,
+        "X-TC-Timestamp": String(timestamp),
+        "X-TC-Region": region
+      };
+      if (config.token) {
+        headers["X-TC-Token"] = config.token;
+      }
+      let response;
+      try {
+        response = await fetchApi(TENCENT_ENDPOINT, {
+          method: "POST",
+          headers,
+          body: payload,
+          signal: request.signal
+        });
+      } catch (error) {
+        if (error?.name === "AbortError" || request.signal?.aborted) {
+          return createFailure("tencent-request-timeout", "temporary_failure", { retryable: true });
+        }
+        return createFailure("tencent-network-failure", "temporary_failure", { retryable: true });
+      }
+      let body;
+      try {
+        body = JSON.parse(await response.text());
+      } catch {
+        return createFailure("tencent-invalid-response", "temporary_failure", { retryable: true });
+      }
+      const result = body?.Response || {};
+      if (!response.ok || result.Error) {
+        return classifyTencentError(result.Error?.Code || "", response.status || 0);
+      }
+      const translation = typeof result.TargetText === "string" ? result.TargetText.trim() : "";
+      if (!translation) {
+        return createFailure("tencent-empty-translation", "provider_failure");
+      }
+      return {
+        ok: true,
+        translation,
+        provider: "tencent",
+        sourceLanguage: result.Source || request.sourceLanguage || "auto",
+        targetLanguage: result.Target || request.targetLanguage || "zh",
+        usage: {
+          characters: Number(result.UsedAmount ?? codePointLength(text))
+        }
+      };
+    }
+    return {
+      id: "tencent",
+      translate
+    };
+  }
+
   // src/background.js
   var TRANSLATION_TIMEOUT_MS = 45e3;
   var STATS_KEY = "xatStats";
   var CACHE_KEY = "xatTranslationCache";
+  var PROVIDER_SETTINGS_KEY = "xatProviderSettings";
+  var DEFAULT_TENCENT_REGION = "ap-guangzhou";
   var MAX_CACHE_ENTRIES = 500;
   var TRANSLATION_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
   var SKIP_CACHE_TTL_MS = 6 * 60 * 60 * 1e3;
@@ -177,6 +387,7 @@
     const wait = options.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     const fetchApi = options.fetch || globalThis.fetch?.bind(globalThis);
     const transactionIdFactory = options.transactionIdFactory || generateClientTransactionId;
+    const tencentProviderFactory = options.tencentProviderFactory || createTencentTranslationProvider;
     const inFlight = /* @__PURE__ */ new Map();
     const cache = /* @__PURE__ */ new Map();
     const skipCache = /* @__PURE__ */ new Map();
@@ -186,6 +397,78 @@
         translate: requestTranslationFromApi
       }
     ]);
+    async function getProviderSettings() {
+      if (!chromeApi.storage?.local) {
+        return {};
+      }
+      const stored = await chromeApi.storage.local.get(PROVIDER_SETTINGS_KEY);
+      return stored?.[PROVIDER_SETTINGS_KEY] || {};
+    }
+    async function getTencentConfigStatus() {
+      const config = (await getProviderSettings()).tencent;
+      return {
+        ok: true,
+        configured: Boolean(config?.secretId && config?.secretKey),
+        region: config?.region || DEFAULT_TENCENT_REGION
+      };
+    }
+    async function saveTencentConfig(payload = {}) {
+      const secretId = typeof payload.secretId === "string" ? payload.secretId.trim() : "";
+      const secretKey = typeof payload.secretKey === "string" ? payload.secretKey.trim() : "";
+      const region = typeof payload.region === "string" && payload.region.trim() ? payload.region.trim() : DEFAULT_TENCENT_REGION;
+      if (!secretId || !secretKey) {
+        return { ok: false, error: "tencent-credentials-required" };
+      }
+      const settings = await getProviderSettings();
+      await chromeApi.storage.local.set({
+        [PROVIDER_SETTINGS_KEY]: {
+          ...settings,
+          tencent: {
+            secretId,
+            secretKey,
+            region,
+            updatedAt: new Date(now()).toISOString()
+          }
+        }
+      });
+      return { ok: true, configured: true, region };
+    }
+    async function deleteTencentConfig() {
+      const settings = await getProviderSettings();
+      const { tencent: _tencent, ...remainingSettings } = settings;
+      await chromeApi.storage.local.set({ [PROVIDER_SETTINGS_KEY]: remainingSettings });
+      return { ok: true, configured: false, region: DEFAULT_TENCENT_REGION };
+    }
+    async function testTencentConfig() {
+      const config = (await getProviderSettings()).tencent;
+      if (!config?.secretId || !config?.secretKey) {
+        return { ok: false, error: "tencent-credentials-missing", category: "auth_failed" };
+      }
+      const provider = tencentProviderFactory({
+        ...config,
+        fetch: fetchApi,
+        crypto: options.crypto || globalThis.crypto,
+        now
+      });
+      const result = await provider.translate({
+        text: "Hello, Tencent Cloud.",
+        sourceLanguage: "en",
+        targetLanguage: "zh"
+      });
+      if (result?.ok) {
+        return {
+          ok: true,
+          translation: result.translation,
+          provider: "tencent"
+        };
+      }
+      return {
+        ok: false,
+        error: result?.error || "tencent-test-failed",
+        ...result?.category ? { category: result.category } : {},
+        ...result?.providerCode ? { providerCode: result.providerCode } : {}
+      };
+    }
     async function waitForRetryDelay(ms, signal) {
       if (signal?.aborted) {
         return false;
@@ -409,9 +692,25 @@
       await chromeApi.storage.local.set({ [STATS_KEY]: next });
     }
     function registerMessageListener() {
-      chromeApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      chromeApi.storage?.local?.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch((error) => console.warn("Unable to restrict extension storage access", error));
+      chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message?.type === "XAT_DIAGNOSTIC_EVENT") {
           recordDiagnostic(message.payload).then(() => sendResponse({ ok: true }));
+          return true;
+        }
+        const tencentConfigHandlers = {
+          XAT_TENCENT_CONFIG_STATUS: getTencentConfigStatus,
+          XAT_TENCENT_CONFIG_SAVE: () => saveTencentConfig(message.payload),
+          XAT_TENCENT_CONFIG_DELETE: deleteTencentConfig,
+          XAT_TENCENT_CONFIG_TEST: testTencentConfig
+        };
+        const tencentConfigHandler = tencentConfigHandlers[message?.type];
+        if (tencentConfigHandler) {
+          if (sender?.tab) {
+            sendResponse({ ok: false, error: "untrusted-config-sender" });
+            return false;
+          }
+          tencentConfigHandler().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error?.message || "tencent-config-failed" }));
           return true;
         }
         if (message?.type !== "XAT_TRANSLATE_TWEET") {
@@ -422,8 +721,12 @@
       });
     }
     return {
+      deleteTencentConfig,
+      getTencentConfigStatus,
       recordDiagnostic,
       registerMessageListener,
+      saveTencentConfig,
+      testTencentConfig,
       translateTweet
     };
   }

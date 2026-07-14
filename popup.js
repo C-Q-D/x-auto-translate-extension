@@ -37,6 +37,111 @@ function sendContentStatus(tabId) {
   });
 }
 
+function sendBackgroundMessage(message) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        resolve({ ok: false, error: error.message || "background-unavailable" });
+        return;
+      }
+      resolve(response || { ok: false, error: "empty-background-response" });
+    });
+  });
+}
+
+function setTencentButtonsDisabled(disabled) {
+  for (const id of ["tencentSave", "tencentTest", "tencentDelete"]) {
+    const button = document.getElementById(id);
+    if (button) {
+      button.disabled = disabled;
+    }
+  }
+}
+
+function renderTencentStatus(result, successText = "") {
+  if (!result?.ok) {
+    setText("tencentStatus", `配置状态：失败（${result?.providerCode || result?.error || "未知错误"}）`);
+    return;
+  }
+
+  if (successText) {
+    setText("tencentStatus", `配置状态：${successText}`);
+    return;
+  }
+
+  setText(
+    "tencentStatus",
+    result.configured ? `配置状态：已配置（${result.region}）` : "配置状态：未配置",
+  );
+}
+
+async function refreshTencentStatus() {
+  const result = await sendBackgroundMessage({ type: "XAT_TENCENT_CONFIG_STATUS" });
+  if (result?.ok && result.region) {
+    const regionInput = document.getElementById("tencentRegion");
+    if (regionInput) {
+      regionInput.value = result.region;
+    }
+  }
+  renderTencentStatus(result);
+}
+
+async function saveTencentConfig() {
+  const secretId = document.getElementById("tencentSecretId")?.value || "";
+  const secretKey = document.getElementById("tencentSecretKey")?.value || "";
+  const region = document.getElementById("tencentRegion")?.value || "";
+  if (!secretId.trim() || !secretKey.trim()) {
+    renderTencentStatus({ ok: false, error: "请填写 SecretId 和 SecretKey" });
+    return;
+  }
+
+  setTencentButtonsDisabled(true);
+  try {
+    const result = await sendBackgroundMessage({
+      type: "XAT_TENCENT_CONFIG_SAVE",
+      payload: { secretId, secretKey, region },
+    });
+    renderTencentStatus(result, result?.ok ? `已保存（${result.region}）` : "");
+    if (result?.ok) {
+      const secretKeyInput = document.getElementById("tencentSecretKey");
+      if (secretKeyInput) {
+        secretKeyInput.value = "";
+      }
+    }
+  } finally {
+    setTencentButtonsDisabled(false);
+  }
+}
+
+async function testTencentConfig() {
+  setTencentButtonsDisabled(true);
+  try {
+    const result = await sendBackgroundMessage({ type: "XAT_TENCENT_CONFIG_TEST" });
+    renderTencentStatus(result, result?.ok ? `测试成功：${result.translation}` : "");
+  } finally {
+    setTencentButtonsDisabled(false);
+  }
+}
+
+async function deleteTencentConfig() {
+  setTencentButtonsDisabled(true);
+  try {
+    const result = await sendBackgroundMessage({ type: "XAT_TENCENT_CONFIG_DELETE" });
+    if (result?.ok) {
+      for (const id of ["tencentSecretId", "tencentSecretKey"]) {
+        const input = document.getElementById(id);
+        if (input) {
+          input.value = "";
+        }
+      }
+    }
+    renderTencentStatus(result);
+  } finally {
+    setTencentButtonsDisabled(false);
+  }
+}
+
 function injectContentScript(tabId) {
   return new Promise((resolve) => {
     chrome.scripting.executeScript(
@@ -121,5 +226,9 @@ async function renderStats() {
 
 renderStats();
 probeCurrentPage();
+refreshTencentStatus();
 
 document.getElementById("probeCurrentPage")?.addEventListener("click", probeCurrentPage);
+document.getElementById("tencentSave")?.addEventListener("click", saveTencentConfig);
+document.getElementById("tencentTest")?.addEventListener("click", testTencentConfig);
+document.getElementById("tencentDelete")?.addEventListener("click", deleteTencentConfig);

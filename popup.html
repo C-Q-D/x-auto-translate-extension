@@ -77,6 +77,54 @@
       label:first-of-type {
         border-top: 0;
       }
+
+      section {
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid #eff3f4;
+      }
+
+      h2 {
+        margin: 0 0 8px;
+        font-size: 14px;
+      }
+
+      .credential-field {
+        display: block;
+        padding: 5px 0;
+        border: 0;
+        color: #536471;
+        font-size: 12px;
+      }
+
+      .credential-field input {
+        box-sizing: border-box;
+        width: 100%;
+        margin-top: 4px;
+        padding: 7px 8px;
+        border: 1px solid #cfd9de;
+        border-radius: 6px;
+        color: #0f1419;
+        font: inherit;
+      }
+
+      .button-row {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+      }
+
+      .button-row button {
+        padding-inline: 5px;
+      }
+
+      .secondary-button {
+        background: #536471;
+      }
+
+      .danger-button {
+        background: #b42318;
+      }
     </style>
   </head>
   <body>
@@ -92,6 +140,28 @@
     <p>打开 X 网页后，插件会在帖子进入视口附近时处理，并用非激活详情页获取 X 自带译文。</p>
     <p id="currentPage">当前页：检测中...</p>
     <button id="probeCurrentPage" type="button">检测当前 X 页面</button>
+    <section aria-labelledby="tencentHeading">
+      <h2 id="tencentHeading">腾讯云机器翻译</h2>
+      <label class="credential-field">
+        SecretId
+        <input id="tencentSecretId" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="credential-field">
+        SecretKey
+        <input id="tencentSecretKey" type="password" autocomplete="new-password" spellcheck="false">
+      </label>
+      <label class="credential-field">
+        地域
+        <input id="tencentRegion" type="text" value="ap-guangzhou" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="button-row">
+        <button id="tencentSave" type="button">保存</button>
+        <button id="tencentTest" class="secondary-button" type="button">测试</button>
+        <button id="tencentDelete" class="danger-button" type="button">删除</button>
+      </div>
+      <p id="tencentStatus" role="status">配置状态：检测中...</p>
+      <p>凭证仅保存在本机扩展存储中；测试会翻译一条短句并消耗少量额度。</p>
+    </section>
     <dl>
       <dt>已展开</dt>
       <dd id="expanded">0</dd>
