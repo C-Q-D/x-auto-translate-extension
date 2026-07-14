@@ -3,7 +3,7 @@
   var SHOW_MORE_SELECTOR = 'button[data-testid="tweet-text-show-more-link"]';
   var TWEET_TEXT_SELECTOR = '[data-testid="tweetText"]';
   var CARD_WRAPPER_SELECTOR = '[data-testid="card.wrapper"]';
-  var LONGFORM_READ_VIEW_SELECTOR = '[data-testid="twitterArticleReadView"]';
+  var LONGFORM_READ_VIEW_SELECTOR = '[data-testid="twitterArticleReadView"], [data-testid="twitterArticleRichTextView"]';
   var LONGFORM_TITLE_SELECTOR = '[data-testid="twitter-article-title"]';
   var LONGFORM_BODY_SELECTOR = '[data-testid="longformRichTextComponent"]';
   var INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';

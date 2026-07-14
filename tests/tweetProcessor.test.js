@@ -468,17 +468,28 @@ test("finds standalone X Article read views outside tweet articles", () => {
   assert.deepEqual(findTweetArticles(readView), [readView]);
 });
 
-test("processor translates standalone X Article read view using status URL metadata", async () => {
+test("processor translates standalone X Article rich text view using status URL metadata", async () => {
   const dom = setupDom(`
     <main>
-      <div data-testid="twitterArticleReadView">
-        <div data-testid="twitter-article-title">Standalone title</div>
-        <div data-testid="longformRichTextComponent">Standalone body</div>
+      <span class="css-1jxf684 r-bcqeeo r-1ttztb7 r-qvutc0 r-poiln3">How I Use Claude Cowork to Run Like a One-Person Company</span>
+      <div data-testid="twitterArticleRichTextView">
+        <div class="DraftEditor-root">
+          <div data-testid="longformRichTextComponent" contenteditable="false">
+            <div data-contents="true">
+              <div class="longform-unstyled" data-block="true">
+                <span data-text="true">Emails. Reports. Formatting.</span>
+              </div>
+              <div class="longform-unstyled" data-block="true">
+                <span data-text="true">Most knowledge workers spend time on necessary work.</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
   `);
   dom.reconfigure({ url: "https://x.com/0xwhrrari/status/2071337983899271175" });
-  const readView = document.querySelector("[data-testid='twitterArticleReadView']");
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
   const requests = [];
 
   const processor = createTweetProcessor({
@@ -497,7 +508,7 @@ test("processor translates standalone X Article read view using status URL metad
       id: "2071337983899271175",
       url: "https://x.com/0xwhrrari/status/2071337983899271175",
       contentType: "longform",
-      text: "Standalone title Standalone body",
+      text: "Emails. Reports. Formatting. Most knowledge workers spend time on necessary work.",
     },
   ]);
   assert.equal(readView.dataset.xatState, "translated");

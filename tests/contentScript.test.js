@@ -174,9 +174,18 @@ test("content script observes standalone X Article read views on status pages", 
     "https://x.com/0xwhrrari/status/2071337983899271175",
     `
       <main>
-        <div data-testid="twitterArticleReadView">
-          <div data-testid="twitter-article-title">Standalone article title</div>
-          <div data-testid="longformRichTextComponent">Standalone article body</div>
+        <span class="css-1jxf684 r-bcqeeo r-1ttztb7 r-qvutc0 r-poiln3">How I Use Claude Cowork to Run Like a One-Person Company</span>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <div data-contents="true">
+              <div class="longform-unstyled" data-block="true">
+                <span data-text="true">Emails. Reports. Formatting.</span>
+              </div>
+              <div class="longform-unstyled" data-block="true">
+                <span data-text="true">Most knowledge workers spend time on necessary work.</span>
+              </div>
+            </div>
+          </div>
         </div>
       </main>
     `,
@@ -185,7 +194,7 @@ test("content script observes standalone X Article read views on status pages", 
 
   await loadContentScript();
 
-  const readView = document.querySelector("[data-testid='twitterArticleReadView']");
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
   assert.equal(observed.length, 1);
   assert.equal(observed[0], readView);
   assert.equal(readView.dataset.xatObserved, "1");
@@ -206,7 +215,7 @@ test("content script observes standalone X Article read views on status pages", 
     id: "2071337983899271175",
     url: "https://x.com/0xwhrrari/status/2071337983899271175",
     contentType: "longform",
-    text: "Standalone article title Standalone article body",
+    text: "Emails. Reports. Formatting. Most knowledge workers spend time on necessary work.",
     csrfToken: "csrf-token",
     dstLang: "zh",
   });
