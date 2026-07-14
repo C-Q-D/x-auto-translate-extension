@@ -228,6 +228,15 @@ if (globalThis.__xatContentScriptLoaded) {
     return findXArticleTargets(document)[0] || null;
   }
 
+  function hasRenderedArticleTranslation(target) {
+    const embeddedTranslation = target?.querySelector?.("[data-xat-longform-translation]");
+    const siblingTranslation = target?.nextElementSibling?.matches?.("[data-xat-longform-translation]")
+      ? target.nextElementSibling
+      : null;
+    const translationNode = embeddedTranslation || siblingTranslation;
+    return Boolean(translationNode?.textContent?.trim());
+  }
+
   async function translateCurrentArticle() {
     if (!canProcessCurrentPage()) {
       return { ok: false, error: "当前页面不支持文章翻译" };
@@ -242,7 +251,7 @@ if (globalThis.__xatContentScriptLoaded) {
       return { ok: false, error: "文章正文还没加载完成，请稍后再试" };
     }
 
-    if (target.dataset.xatState === "translated") {
+    if (target.dataset.xatState === "translated" && hasRenderedArticleTranslation(target)) {
       return { ok: true, message: "文章翻译：已存在译文" };
     }
     if (target.dataset.xatState === "processing") {

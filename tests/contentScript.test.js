@@ -390,6 +390,52 @@ test("manual article translation waits for longform body hydration before reques
   dom.window.close();
 });
 
+test("manual article translation retries when translated state has no rendered longform translation", async () => {
+  const { dom, listeners, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView" data-xat-state="translated">
+          <div data-testid="longformRichTextComponent">
+            <span data-text="true">Article body needs a visible translation.</span>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+
+  let response;
+  listeners.forEach((listener) => listener(
+    { type: "XAT_FORCE_TRANSLATE_ARTICLE" },
+    null,
+    (value) => {
+      response = value;
+    },
+  ));
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.deepEqual(response, { ok: true, message: "文章翻译：已完成" });
+  const message = sentMessages.find((entry) => entry.type === "XAT_TRANSLATE_TWEET");
+  assert.deepEqual(message.payload, {
+    id: "2071337983899271175",
+    url: "https://x.com/0xwhrrari/status/2071337983899271175",
+    contentType: "longform",
+    text: "Article body needs a visible translation.",
+    csrfToken: "csrf-token",
+    dstLang: "zh",
+  });
+  assert.equal(
+    document.querySelector("[data-testid='twitterArticleRichTextView']").nextElementSibling?.getAttribute("data-xat-longform-translation"),
+    "1",
+  );
+  dom.window.close();
+});
+
 test("manual article translation does not fall back to ordinary tweets", async () => {
   const { dom, listeners, sentMessages } = setupDom(
     "https://x.com/openai/status/2071647677591466098",

@@ -594,6 +594,11 @@
         document.addEventListener("readystatechange", handleReadyStateChange);
         window.addEventListener("load", handleLoad, { once: true });
       });
+    }, hasRenderedArticleTranslation = function(target) {
+      const embeddedTranslation = target?.querySelector?.("[data-xat-longform-translation]");
+      const siblingTranslation = target?.nextElementSibling?.matches?.("[data-xat-longform-translation]") ? target.nextElementSibling : null;
+      const translationNode = embeddedTranslation || siblingTranslation;
+      return Boolean(translationNode?.textContent?.trim());
     }, scan = function(root = document) {
       if (!canProcessCurrentPage()) {
         console.debug("[X Auto Translate] skipping unsupported X page");
@@ -665,7 +670,7 @@
       if (!extractLongformText(target)) {
         return { ok: false, error: "\u6587\u7AE0\u6B63\u6587\u8FD8\u6CA1\u52A0\u8F7D\u5B8C\u6210\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5" };
       }
-      if (target.dataset.xatState === "translated") {
+      if (target.dataset.xatState === "translated" && hasRenderedArticleTranslation(target)) {
         return { ok: true, message: "\u6587\u7AE0\u7FFB\u8BD1\uFF1A\u5DF2\u5B58\u5728\u8BD1\u6587" };
       }
       if (target.dataset.xatState === "processing") {
