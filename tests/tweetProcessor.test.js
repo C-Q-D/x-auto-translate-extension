@@ -11,6 +11,7 @@ import {
   findShowMoreButton,
   findTranslateButton,
   getTweetMetadata,
+  renderLongformTranslation,
   replaceTweetTextWithTranslation,
   renderTranslationStatus,
   shouldProcessTimelinePage,
@@ -488,8 +489,85 @@ test("processor requests translation for X Article longform text", async () => {
     },
   ]);
   assert.equal(tweet.dataset.xatState, "expanded");
-  assert.equal(tweet.querySelector("[data-xat-status]").textContent, "X 暂时没有返回译文：longform-provider-unavailable");
+  assert.equal(tweet.querySelector("[data-xat-status]").textContent, "长文暂时没有返回译文：longform-provider-unavailable");
   assert.deepEqual(events.map(([event]) => event), ["translation-requested", "translation-failed"]);
+});
+
+test("renders longform translation as a stable block after the article read view", () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title">Longform title</div>
+        <div data-testid="longformRichTextComponent">
+          <p>Longform body paragraph</p>
+        </div>
+      </div>
+    </article>
+  `);
+
+  const tweet = document.querySelector("article");
+  const translation = renderLongformTranslation(tweet, "长文译文");
+
+  assert.equal(translation?.getAttribute("data-xat-longform-translation"), "1");
+  assert.equal(translation.textContent, "长文译文");
+  assert.equal(translation.previousElementSibling?.getAttribute("data-testid"), "twitterArticleReadView");
+  assert.equal(translation.getAttribute("data-xat-original-text"), "Longform title Longform body paragraph");
+});
+
+test("processor renders returned longform translation without replacing the original read view", async () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title">Longform title</div>
+        <div data-testid="longformRichTextComponent">
+          <p>Longform body paragraph</p>
+        </div>
+      </div>
+    </article>
+  `);
+  const tweet = document.querySelector("article");
+
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => 1000,
+    requestTranslation: async () => ({ ok: true, translation: "第三方长文译文", provider: "tencent" }),
+  });
+
+  await processor.processTweet(tweet);
+
+  assert.equal(tweet.dataset.xatState, "translated");
+  assert.equal(tweet.dataset.xatTranslatedAt, "1000");
+  assert.equal(tweet.querySelector("[data-xat-longform-translation]").textContent, "第三方长文译文");
+  assert.equal(tweet.querySelector("[data-testid='twitterArticleReadView'] [data-testid='twitter-article-title']").textContent, "Longform title");
+  assert.equal(tweet.querySelector("[data-xat-status]"), null);
+});
+
+test("processor explains missing third-party providers for longform translation", async () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title">Longform title</div>
+        <div data-testid="longformRichTextComponent">
+          <p>Longform body paragraph</p>
+        </div>
+      </div>
+    </article>
+  `);
+  const tweet = document.querySelector("article");
+
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => 1000,
+    requestTranslation: async () => ({ ok: false, error: "third-party-provider-unavailable" }),
+  });
+
+  await processor.processTweet(tweet);
+
+  assert.equal(tweet.dataset.xatState, "expanded");
+  assert.equal(tweet.querySelector("[data-xat-status]").textContent, "配置第三方翻译服务后可翻译长文");
 });
 
 test("processor requests only primary longform when a quoted longform appears first", async () => {

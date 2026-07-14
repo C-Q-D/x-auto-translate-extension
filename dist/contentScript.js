@@ -209,6 +209,43 @@
     tweetText.textContent = translation;
     return tweetText;
   }
+  function renderLongformTranslation(tweet, translation) {
+    const target = findLongformTarget(tweet);
+    const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR) ? target : target?.closest?.(LONGFORM_READ_VIEW_SELECTOR);
+    if (!readView || !translation) {
+      return null;
+    }
+    tweet.querySelector("[data-xat-status]")?.remove();
+    const existing = tweet.querySelector("[data-xat-longform-translation]");
+    const translationNode = existing || tweet.ownerDocument.createElement("div");
+    translationNode.setAttribute("data-xat-longform-translation", "1");
+    translationNode.setAttribute("data-xat-translation", "1");
+    if (!translationNode.hasAttribute("data-xat-original-text")) {
+      translationNode.setAttribute("data-xat-original-text", extractLongformText(tweet));
+    }
+    translationNode.textContent = translation;
+    translationNode.style.whiteSpace = "pre-wrap";
+    translationNode.style.marginTop = "12px";
+    translationNode.style.fontSize = "15px";
+    translationNode.style.lineHeight = "22px";
+    if (!existing && readView.parentElement) {
+      readView.parentElement.insertBefore(translationNode, readView.nextSibling);
+    }
+    return translationNode;
+  }
+  function renderTranslationResult(tweet, translation) {
+    return isLongformTweet(tweet) ? renderLongformTranslation(tweet, translation) : replaceTweetTextWithTranslation(tweet, translation);
+  }
+  function formatTranslationFailureMessage(tweet, result) {
+    const error = result?.error || "";
+    if (isLongformTweet(tweet)) {
+      if (error === "third-party-provider-unavailable") {
+        return "\u914D\u7F6E\u7B2C\u4E09\u65B9\u7FFB\u8BD1\u670D\u52A1\u540E\u53EF\u7FFB\u8BD1\u957F\u6587";
+      }
+      return `\u957F\u6587\u6682\u65F6\u6CA1\u6709\u8FD4\u56DE\u8BD1\u6587${error ? `\uFF1A${error}` : ""}`;
+    }
+    return `X \u6682\u65F6\u6CA1\u6709\u8FD4\u56DE\u8BD1\u6587${error ? `\uFF1A${error}` : ""}`;
+  }
   function renderTranslationStatus(tweet, message) {
     if (!tweet || !message) {
       return null;
@@ -332,7 +369,7 @@
           return;
         }
         if (result?.translation) {
-          replaceTweetTextWithTranslation(tweet, result.translation);
+          renderTranslationResult(tweet, result.translation);
           tweet.dataset.xatState = "translated";
           tweet.dataset.xatTranslatedAt = String(now());
           onEvent("translation-rendered", metadata);
@@ -341,7 +378,7 @@
           tweet.dataset.xatState = "skipped";
           tweet.dataset.xatSkippedAt = String(now());
         } else {
-          renderTranslationStatus(tweet, `X \u6682\u65F6\u6CA1\u6709\u8FD4\u56DE\u8BD1\u6587${result?.error ? `\uFF1A${result.error}` : ""}`);
+          renderTranslationStatus(tweet, formatTranslationFailureMessage(tweet, result));
           tweet.dataset.xatState = "expanded";
           tweet.dataset.xatLastAttempt = String(now());
           onEvent("translation-failed", { ...metadata, error: result?.error || "empty-result" });

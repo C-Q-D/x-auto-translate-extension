@@ -261,6 +261,56 @@ export function replaceTweetTextWithTranslation(tweet, translation) {
   return tweetText;
 }
 
+export function renderLongformTranslation(tweet, translation) {
+  const target = findLongformTarget(tweet);
+  const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR)
+    ? target
+    : target?.closest?.(LONGFORM_READ_VIEW_SELECTOR);
+  if (!readView || !translation) {
+    return null;
+  }
+
+  tweet.querySelector("[data-xat-status]")?.remove();
+  const existing = tweet.querySelector("[data-xat-longform-translation]");
+  const translationNode = existing || tweet.ownerDocument.createElement("div");
+  translationNode.setAttribute("data-xat-longform-translation", "1");
+  translationNode.setAttribute("data-xat-translation", "1");
+  if (!translationNode.hasAttribute("data-xat-original-text")) {
+    translationNode.setAttribute("data-xat-original-text", extractLongformText(tweet));
+  }
+
+  // 长文富文本结构复杂，直接替换原节点容易破坏链接和媒体；独立译文块更稳定。
+  translationNode.textContent = translation;
+  translationNode.style.whiteSpace = "pre-wrap";
+  translationNode.style.marginTop = "12px";
+  translationNode.style.fontSize = "15px";
+  translationNode.style.lineHeight = "22px";
+
+  if (!existing && readView.parentElement) {
+    readView.parentElement.insertBefore(translationNode, readView.nextSibling);
+  }
+
+  return translationNode;
+}
+
+function renderTranslationResult(tweet, translation) {
+  return isLongformTweet(tweet)
+    ? renderLongformTranslation(tweet, translation)
+    : replaceTweetTextWithTranslation(tweet, translation);
+}
+
+function formatTranslationFailureMessage(tweet, result) {
+  const error = result?.error || "";
+  if (isLongformTweet(tweet)) {
+    if (error === "third-party-provider-unavailable") {
+      return "配置第三方翻译服务后可翻译长文";
+    }
+    return `长文暂时没有返回译文${error ? `：${error}` : ""}`;
+  }
+
+  return `X 暂时没有返回译文${error ? `：${error}` : ""}`;
+}
+
 export function renderTranslationStatus(tweet, message) {
   if (!tweet || !message) {
     return null;
@@ -416,7 +466,7 @@ export function createTweetProcessor(options = {}) {
       }
 
       if (result?.translation) {
-        replaceTweetTextWithTranslation(tweet, result.translation);
+        renderTranslationResult(tweet, result.translation);
         tweet.dataset.xatState = "translated";
         tweet.dataset.xatTranslatedAt = String(now());
         onEvent("translation-rendered", metadata);
@@ -425,7 +475,7 @@ export function createTweetProcessor(options = {}) {
         tweet.dataset.xatState = "skipped";
         tweet.dataset.xatSkippedAt = String(now());
       } else {
-        renderTranslationStatus(tweet, `X 暂时没有返回译文${result?.error ? `：${result.error}` : ""}`);
+        renderTranslationStatus(tweet, formatTranslationFailureMessage(tweet, result));
         tweet.dataset.xatState = "expanded";
         tweet.dataset.xatLastAttempt = String(now());
         onEvent("translation-failed", { ...metadata, error: result?.error || "empty-result" });
