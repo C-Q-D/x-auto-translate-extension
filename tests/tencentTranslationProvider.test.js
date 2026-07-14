@@ -190,7 +190,9 @@ test("Tencent provider maps unsupported source languages without disabling the p
 test("Tencent provider splits long text into limited concurrent requests and merges translations", async () => {
   let activeRequests = 0;
   let maxActiveRequests = 0;
+  let nowMs = NOW_MS;
   const calls = [];
+  const waits = [];
   const provider = createTencentTranslationProvider({
     secretId: SECRET_ID,
     secretKey: SECRET_KEY,
@@ -213,7 +215,11 @@ test("Tencent provider splits long text into limited concurrent requests and mer
       });
     },
     crypto: webcrypto,
-    now: () => NOW_MS,
+    now: () => nowMs,
+    wait: async (ms) => {
+      waits.push(ms);
+      nowMs += ms;
+    },
     maxConcurrentRequests: 3,
   });
 
@@ -223,10 +229,45 @@ test("Tencent provider splits long text into limited concurrent requests and mer
   assert.equal(result.translation, "译文1:2000\n\n译文2:2000\n\n译文3:500");
   assert.equal(result.usage.characters, 4500);
   assert.equal(calls.length, 3);
-  assert.equal(maxActiveRequests, 3);
+  assert.ok(maxActiveRequests <= 3);
+  assert.deepEqual(waits, [220, 220]);
   for (const [, options] of calls) {
     assert.ok(JSON.parse(options.body).SourceText.length <= 2000);
   }
+});
+
+test("Tencent provider can disable request spacing for controlled high-concurrency environments", async () => {
+  let activeRequests = 0;
+  let maxActiveRequests = 0;
+  const provider = createTencentTranslationProvider({
+    secretId: SECRET_ID,
+    secretKey: SECRET_KEY,
+    fetch: async (_url, options) => {
+      activeRequests += 1;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      activeRequests -= 1;
+      const { SourceText } = JSON.parse(options.body);
+      return createResponse(200, {
+        Response: {
+          RequestId: "request-id",
+          Source: "en",
+          Target: "zh",
+          TargetText: SourceText,
+          UsedAmount: SourceText.length,
+        },
+      });
+    },
+    crypto: webcrypto,
+    now: () => NOW_MS,
+    maxConcurrentRequests: 3,
+    requestIntervalMs: 0,
+  });
+
+  const result = await provider.translate({ text: "a".repeat(4500), targetLanguage: "zh" });
+
+  assert.equal(result.ok, true);
+  assert.equal(maxActiveRequests, 3);
 });
 
 test("Tencent provider returns the first failed chunk result when long text chunk translation fails", async () => {

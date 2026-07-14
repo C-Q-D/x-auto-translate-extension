@@ -8,6 +8,7 @@ const TENCENT_VERSION = "2018-03-21";
 const TENCENT_ALGORITHM = "TC3-HMAC-SHA256";
 const TENCENT_MAX_TEXT_LENGTH = 2000;
 const TENCENT_DEFAULT_CONCURRENCY = 3;
+const TENCENT_MIN_REQUEST_INTERVAL_MS = 220;
 
 const textEncoder = new TextEncoder();
 
@@ -186,11 +187,29 @@ export function createTencentTranslationProvider(config = {}) {
   const fetchApi = config.fetch || globalThis.fetch?.bind(globalThis);
   const cryptoApi = config.crypto || globalThis.crypto;
   const now = config.now || (() => Date.now());
+  const wait = config.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const region = config.region || "ap-guangzhou";
   const maxConcurrentRequests = Math.max(
     1,
     Math.min(Number(config.maxConcurrentRequests || TENCENT_DEFAULT_CONCURRENCY), TENCENT_DEFAULT_CONCURRENCY),
   );
+  const requestIntervalMs = Math.max(0, Number(config.requestIntervalMs ?? TENCENT_MIN_REQUEST_INTERVAL_MS));
+  let nextRequestAt = 0;
+
+  async function waitForRequestSlot(signal) {
+    if (signal?.aborted || requestIntervalMs <= 0) {
+      return;
+    }
+
+    const currentTime = now();
+    const scheduledAt = Math.max(currentTime, nextRequestAt);
+    nextRequestAt = scheduledAt + requestIntervalMs;
+    const delayMs = scheduledAt - currentTime;
+    if (delayMs > 0) {
+      // 腾讯云文本翻译存在 QPS 限制，长文分块需要控制请求启动间隔，避免瞬时触发限频。
+      await wait(delayMs);
+    }
+  }
 
   async function translateSingleText(text, request = {}) {
     if (!text) {
@@ -204,6 +223,11 @@ export function createTencentTranslationProvider(config = {}) {
     }
     if (!cryptoApi?.subtle) {
       return createFailure("tencent-crypto-unavailable", "configuration_error");
+    }
+
+    await waitForRequestSlot(request.signal);
+    if (request.signal?.aborted) {
+      return createFailure("tencent-request-timeout", "temporary_failure", { retryable: true });
     }
 
     const payload = JSON.stringify({
