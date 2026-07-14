@@ -1,4 +1,10 @@
-import { createTweetProcessor, findProcessTargetFromNode, findTweetArticles, shouldProcessTimelinePage } from "./tweetProcessor.js";
+import {
+  createTweetProcessor,
+  findProcessTargetFromNode,
+  findTweetArticles,
+  findXArticleTargets,
+  shouldProcessTimelinePage,
+} from "./tweetProcessor.js";
 import { sendRuntimeMessage } from "./runtimeMessaging.js";
 
 const DEFAULT_SETTINGS = {
@@ -6,6 +12,7 @@ const DEFAULT_SETTINGS = {
   autoTranslate: true,
   processViewportOnly: true,
 };
+const FORCE_TRANSLATE_ARTICLE_MESSAGE = "XAT_FORCE_TRANSLATE_ARTICLE";
 
 function getExtensionVersion() {
   return globalThis.chrome?.runtime?.getManifest?.()?.version || "unknown";
@@ -140,6 +147,49 @@ if (globalThis.__xatContentScriptLoaded) {
     tweet.dataset.xatObserved = "1";
     viewportObserver.observe(tweet);
   }
+
+  async function translateCurrentArticle() {
+    if (!canProcessCurrentPage()) {
+      return { ok: false, error: "当前页面不支持文章翻译" };
+    }
+
+    scan();
+    const target = findXArticleTargets(document)[0];
+    if (!target) {
+      return { ok: false, error: "当前页面未找到 X 长文" };
+    }
+
+    if (target.dataset.xatState === "translated") {
+      return { ok: true, message: "文章翻译：已存在译文" };
+    }
+    if (target.dataset.xatState === "processing") {
+      return { ok: true, message: "文章翻译：正在翻译中" };
+    }
+
+    // 手动触发代表用户已经看到文章区域；这里清理自动流程留下的冷却状态，让本次点击立即重读当前 DOM。
+    delete target.dataset.xatState;
+    delete target.dataset.xatLastAttempt;
+    await processor.processTweet(target);
+
+    if (target.dataset.xatState === "translated") {
+      return { ok: true, message: "文章翻译：已完成" };
+    }
+    return { ok: false, error: target.querySelector("[data-xat-status]")?.textContent || "文章翻译未完成" };
+  }
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== FORCE_TRANSLATE_ARTICLE_MESSAGE) {
+      return false;
+    }
+
+    translateCurrentArticle()
+      .then(sendResponse)
+      .catch((error) => {
+        recordDiagnostic("manual-article-translation-error", { error: error?.message || "manual-article-translation-error" });
+        sendResponse({ ok: false, error: error?.message || "manual-article-translation-error" });
+      });
+    return true;
+  });
 
   function scan(root = document) {
     if (!canProcessCurrentPage()) {

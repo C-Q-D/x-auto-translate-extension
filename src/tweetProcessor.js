@@ -197,6 +197,17 @@ export function isLongformTweet(tweet) {
   return Boolean(findLongformTarget(tweet));
 }
 
+/**
+ * 查找页面中真正可作为 X Article 长文处理的目标。
+ *
+ * @param {ParentNode | Element | Document} root 扫描范围，默认是当前 document。
+ * @returns {Element[]} 返回包含主长文正文的 tweet article 或独立长文容器；不包含普通帖子和引用卡片。
+ * @sideEffects 本函数只读取 DOM，不修改页面。
+ */
+export function findXArticleTargets(root = document) {
+  return findTweetArticles(root).filter((target) => isLongformTweet(target));
+}
+
 export function extractLongformText(tweet) {
   const target = findLongformTarget(tweet);
   const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR)

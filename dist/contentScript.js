@@ -147,6 +147,9 @@
   function isLongformTweet(tweet) {
     return Boolean(findLongformTarget(tweet));
   }
+  function findXArticleTargets(root = document) {
+    return findTweetArticles(root).filter((target) => isLongformTweet(target));
+  }
   function extractLongformText(tweet) {
     const target = findLongformTarget(tweet);
     const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR) ? target : target?.closest?.(LONGFORM_READ_VIEW_SELECTOR);
@@ -465,6 +468,7 @@
     autoTranslate: true,
     processViewportOnly: true
   };
+  var FORCE_TRANSLATE_ARTICLE_MESSAGE = "XAT_FORCE_TRANSLATE_ARTICLE";
   function getExtensionVersion() {
     return globalThis.chrome?.runtime?.getManifest?.()?.version || "unknown";
   }
@@ -587,6 +591,39 @@
         threshold: 0.01
       }
     );
+    async function translateCurrentArticle() {
+      if (!canProcessCurrentPage()) {
+        return { ok: false, error: "\u5F53\u524D\u9875\u9762\u4E0D\u652F\u6301\u6587\u7AE0\u7FFB\u8BD1" };
+      }
+      scan();
+      const target = findXArticleTargets(document)[0];
+      if (!target) {
+        return { ok: false, error: "\u5F53\u524D\u9875\u9762\u672A\u627E\u5230 X \u957F\u6587" };
+      }
+      if (target.dataset.xatState === "translated") {
+        return { ok: true, message: "\u6587\u7AE0\u7FFB\u8BD1\uFF1A\u5DF2\u5B58\u5728\u8BD1\u6587" };
+      }
+      if (target.dataset.xatState === "processing") {
+        return { ok: true, message: "\u6587\u7AE0\u7FFB\u8BD1\uFF1A\u6B63\u5728\u7FFB\u8BD1\u4E2D" };
+      }
+      delete target.dataset.xatState;
+      delete target.dataset.xatLastAttempt;
+      await processor.processTweet(target);
+      if (target.dataset.xatState === "translated") {
+        return { ok: true, message: "\u6587\u7AE0\u7FFB\u8BD1\uFF1A\u5DF2\u5B8C\u6210" };
+      }
+      return { ok: false, error: target.querySelector("[data-xat-status]")?.textContent || "\u6587\u7AE0\u7FFB\u8BD1\u672A\u5B8C\u6210" };
+    }
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type !== FORCE_TRANSLATE_ARTICLE_MESSAGE) {
+        return false;
+      }
+      translateCurrentArticle().then(sendResponse).catch((error) => {
+        recordDiagnostic("manual-article-translation-error", { error: error?.message || "manual-article-translation-error" });
+        sendResponse({ ok: false, error: error?.message || "manual-article-translation-error" });
+      });
+      return true;
+    });
     globalThis.__xatScan = scan;
     const mutationObserver = new MutationObserver((mutations) => {
       for (const mutation of mutations) {

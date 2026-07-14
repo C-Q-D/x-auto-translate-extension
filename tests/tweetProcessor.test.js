@@ -12,6 +12,7 @@ import {
   findTweetArticles,
   findShowMoreButton,
   findTranslateButton,
+  findXArticleTargets,
   getTweetMetadata,
   renderLongformTranslation,
   replaceTweetTextWithTranslation,
@@ -467,6 +468,28 @@ test("finds standalone X Article read views outside tweet articles", () => {
   const readView = document.querySelector("[data-testid='twitterArticleReadView']");
   assert.deepEqual(findTweetArticles(document), [readView]);
   assert.deepEqual(findTweetArticles(readView), [readView]);
+});
+
+test("finds only primary X Article targets and ignores ordinary tweets with quoted article cards", () => {
+  setupDom(`
+    <main>
+      <article data-testid="tweet">
+        <a href="/openai/status/2071647677591466098"><time>刚刚</time></a>
+        <div data-testid="tweetText">Normal tweet with quoted article</div>
+        <div role="link">
+          <div data-testid="twitterArticleReadView">
+            <div data-testid="longformRichTextComponent">Quoted article body</div>
+          </div>
+        </div>
+      </article>
+      <div data-testid="twitterArticleRichTextView">
+        <div data-testid="longformRichTextComponent">Standalone article body</div>
+      </div>
+    </main>
+  `);
+
+  const standaloneArticle = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  assert.deepEqual(findXArticleTargets(document), [standaloneArticle]);
 });
 
 test("processor translates standalone X Article rich text view using status URL metadata", async () => {

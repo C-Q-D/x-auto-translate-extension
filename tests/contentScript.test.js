@@ -54,6 +54,10 @@ function setupDom(url, html) {
       getManifest: () => ({ version: "0.2.0" }),
       sendMessage(message, callback) {
         sentMessages.push(message);
+        if (message.type === "XAT_TRANSLATE_TWEET") {
+          callback?.({ ok: true, translation: "内容脚本测试译文" });
+          return;
+        }
         callback?.({ ok: true });
       },
       onMessage: {
@@ -274,6 +278,86 @@ test("content script reschedules standalone X Article when rich text hydrates af
     csrfToken: "csrf-token",
     dstLang: "zh",
   });
+  dom.window.close();
+});
+
+test("manual article translation only processes X Article longform targets", async () => {
+  const { dom, listeners, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <article data-testid="tweet">
+          <a href="/reply/status/3333333333333333333"><time>刚刚</time></a>
+          <div data-testid="tweetText">普通评论不应该被手动文章翻译处理</div>
+        </article>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <span data-text="true">Manual article body.</span>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+
+  let response;
+  const handledValues = listeners.map((listener) => listener(
+    { type: "XAT_FORCE_TRANSLATE_ARTICLE" },
+    null,
+    (value) => {
+      response = value;
+    },
+  ));
+  await flushMutations();
+  await wait(650);
+  await flushMutations();
+
+  assert.deepEqual(handledValues, [false, true]);
+  assert.deepEqual(response, { ok: true, message: "文章翻译：已完成" });
+  const translationMessages = sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET");
+  assert.equal(translationMessages.length, 1);
+  assert.deepEqual(translationMessages[0].payload, {
+    id: "2071337983899271175",
+    url: "https://x.com/0xwhrrari/status/2071337983899271175",
+    contentType: "longform",
+    text: "Manual article body.",
+    csrfToken: "csrf-token",
+    dstLang: "zh",
+  });
+  assert.equal(document.querySelector("[data-testid='tweetText']").getAttribute("data-xat-translation"), null);
+  dom.window.close();
+});
+
+test("manual article translation does not fall back to ordinary tweets", async () => {
+  const { dom, listeners, sentMessages } = setupDom(
+    "https://x.com/openai/status/2071647677591466098",
+    `
+      <main>
+        <article data-testid="tweet">
+          <a href="/openai/status/2071647677591466098"><time>刚刚</time></a>
+          <div data-testid="tweetText">Ordinary tweet only</div>
+        </article>
+      </main>
+    `,
+  );
+
+  await loadContentScript();
+
+  let response;
+  listeners.forEach((listener) => listener(
+    { type: "XAT_FORCE_TRANSLATE_ARTICLE" },
+    null,
+    (value) => {
+      response = value;
+    },
+  ));
+  await flushMutations();
+
+  assert.deepEqual(response, { ok: false, error: "当前页面未找到 X 长文" });
+  assert.equal(sentMessages.some((entry) => entry.type === "XAT_TRANSLATE_TWEET"), false);
+  assert.equal(document.querySelector("[data-testid='tweetText']").textContent, "Ordinary tweet only");
   dom.window.close();
 });
 
