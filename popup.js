@@ -1,4 +1,7 @@
+// 本文件负责扩展弹窗中的页面检测、腾讯云配置和手动文章翻译入口。
+// 弹窗只负责发送控制消息和渲染状态，不直接读取 X 页面 DOM 或执行翻译。
 const STATS_KEY = "xatStats";
+const FORCE_TRANSLATE_ARTICLE_MESSAGE = "XAT_FORCE_TRANSLATE_ARTICLE";
 
 function setText(id, value) {
   const element = document.getElementById(id);
@@ -33,6 +36,26 @@ function sendContentStatus(tabId) {
         return;
       }
       resolve(response || { ok: false, error: "empty-content-status" });
+    });
+  });
+}
+
+/**
+ * 向当前内容脚本发送“仅翻译 X Article 长文”的手动触发消息。
+ *
+ * @param {number} tabId 当前激活标签页 ID。
+ * @returns {Promise<object>} 返回 content script 的处理结果；通信失败时转换为稳定错误对象。
+ * @sideEffects 会通过 chrome.tabs.sendMessage 与当前标签页通信，不直接修改页面 DOM。
+ */
+function sendArticleTranslationRequest(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { type: FORCE_TRANSLATE_ARTICLE_MESSAGE }, (response) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        resolve({ ok: false, error: error.message || "content-script-unavailable" });
+        return;
+      }
+      resolve(response || { ok: false, error: "empty-article-translation-response" });
     });
   });
 }
@@ -177,6 +200,15 @@ function renderPageStatus(status) {
   setText("version", status.version || chrome.runtime.getManifest().version);
 }
 
+function renderArticleTranslationStatus(result) {
+  if (!result?.ok) {
+    setText("articleTranslationStatus", `文章翻译：失败（${result?.error || "未知错误"}）`);
+    return;
+  }
+
+  setText("articleTranslationStatus", result.message || "文章翻译：已发送请求");
+}
+
 async function probeCurrentPage() {
   const button = document.getElementById("probeCurrentPage");
   if (button) {
@@ -211,6 +243,29 @@ async function probeCurrentPage() {
   }
 }
 
+async function translateCurrentArticle() {
+  const button = document.getElementById("translateCurrentArticle");
+  if (button) {
+    button.disabled = true;
+  }
+
+  try {
+    const tab = await getActiveTab();
+    if (!tab?.id || !isXUrl(tab.url)) {
+      renderArticleTranslationStatus({ ok: false, error: "请切到 X 文章页面后再翻译" });
+      return;
+    }
+
+    setText("articleTranslationStatus", "文章翻译：正在发送请求...");
+    const result = await sendArticleTranslationRequest(tab.id);
+    renderArticleTranslationStatus(result);
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function renderStats() {
   const result = await chrome.storage.local.get(STATS_KEY);
   const stats = result?.[STATS_KEY] || {};
@@ -229,6 +284,7 @@ probeCurrentPage();
 refreshTencentStatus();
 
 document.getElementById("probeCurrentPage")?.addEventListener("click", probeCurrentPage);
+document.getElementById("translateCurrentArticle")?.addEventListener("click", translateCurrentArticle);
 document.getElementById("tencentSave")?.addEventListener("click", saveTencentConfig);
 document.getElementById("tencentTest")?.addEventListener("click", testTencentConfig);
 document.getElementById("tencentDelete")?.addEventListener("click", deleteTencentConfig);

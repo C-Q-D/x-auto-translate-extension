@@ -4,6 +4,9 @@ import test from "node:test";
 
 import { JSDOM } from "jsdom";
 
+// 本测试文件覆盖扩展弹窗与后台、当前标签页内容脚本之间的消息契约。
+// 测试重点是确保用户操作只发送对应控制消息，不直接依赖真实浏览器页面。
+
 async function flushAsyncWork() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -13,6 +16,7 @@ test("popup saves, tests, and deletes Tencent credentials through the background
   const html = await readFile(new URL("../popup.html", import.meta.url), "utf8");
   const dom = new JSDOM(html, { url: "chrome-extension://example/popup.html" });
   const messages = [];
+  const tabMessages = [];
   const chromeMock = {
     runtime: {
       lastError: null,
@@ -44,7 +48,12 @@ test("popup saves, tests, and deletes Tencent credentials through the background
       query(_query, callback) {
         callback([{ id: 1, url: "https://x.com/home" }]);
       },
-      sendMessage(_tabId, _message, callback) {
+      sendMessage(tabId, message, callback) {
+        tabMessages.push({ tabId, message });
+        if (message.type === "XAT_FORCE_TRANSLATE_ARTICLE") {
+          callback({ ok: true, message: "文章翻译：已发送请求" });
+          return;
+        }
         callback({
           ok: true,
           canProcess: true,
@@ -65,6 +74,14 @@ test("popup saves, tests, and deletes Tencent credentials through the background
     await import(`../popup.js?test=${Date.now()}`);
     await flushAsyncWork();
     assert.equal(document.getElementById("tencentStatus").textContent, "配置状态：未配置");
+
+    document.getElementById("translateCurrentArticle").click();
+    await flushAsyncWork();
+    assert.deepEqual(tabMessages.at(-1), {
+      tabId: 1,
+      message: { type: "XAT_FORCE_TRANSLATE_ARTICLE" },
+    });
+    assert.equal(document.getElementById("articleTranslationStatus").textContent, "文章翻译：已发送请求");
 
     document.getElementById("tencentSecretId").value = "AKIDEXAMPLE";
     document.getElementById("tencentSecretKey").value = "example-secret";
