@@ -82,6 +82,12 @@ async function flushMutations() {
   await Promise.resolve();
 }
 
+async function flushManualArticleWork(rounds = 80) {
+  for (let index = 0; index < rounds; index += 1) {
+    await Promise.resolve();
+  }
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -313,6 +319,7 @@ test("manual article translation only processes X Article longform targets", asy
   await flushMutations();
   await wait(650);
   await flushMutations();
+  await flushManualArticleWork();
 
   assert.deepEqual(handledValues, [false, true]);
   assert.deepEqual(response, { ok: true, message: "文章翻译：已完成" });
@@ -327,6 +334,59 @@ test("manual article translation only processes X Article longform targets", asy
     dstLang: "zh",
   });
   assert.equal(document.querySelector("[data-testid='tweetText']").getAttribute("data-xat-translation"), null);
+  dom.window.close();
+});
+
+test("manual article translation waits for longform body hydration before requesting", async () => {
+  const { dom, listeners, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent"></div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+
+  const body = document.querySelector("[data-testid='longformRichTextComponent']");
+  let response;
+  listeners.forEach((listener) => listener(
+    { type: "XAT_FORCE_TRANSLATE_ARTICLE" },
+    null,
+    (value) => {
+      response = value;
+    },
+  ));
+  assert.equal(sentMessages.some((entry) => entry.type === "XAT_TRANSLATE_TWEET"), false);
+
+  body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div data-contents="true">
+        <div class="longform-unstyled" data-block="true">
+          <span data-text="true">Hydrated manual article body.</span>
+        </div>
+      </div>
+    `,
+  );
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.deepEqual(response, { ok: true, message: "文章翻译：已完成" });
+  const message = sentMessages.find((entry) => entry.type === "XAT_TRANSLATE_TWEET");
+  assert.deepEqual(message.payload, {
+    id: "2071337983899271175",
+    url: "https://x.com/0xwhrrari/status/2071337983899271175",
+    contentType: "longform",
+    text: "Hydrated manual article body.",
+    csrfToken: "csrf-token",
+    dstLang: "zh",
+  });
   dom.window.close();
 });
 
@@ -354,6 +414,7 @@ test("manual article translation does not fall back to ordinary tweets", async (
     },
   ));
   await flushMutations();
+  await flushManualArticleWork();
 
   assert.deepEqual(response, { ok: false, error: "当前页面未找到 X 长文" });
   assert.equal(sentMessages.some((entry) => entry.type === "XAT_TRANSLATE_TWEET"), false);

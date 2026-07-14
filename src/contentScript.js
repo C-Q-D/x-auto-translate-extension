@@ -1,5 +1,6 @@
 import {
   createTweetProcessor,
+  extractLongformText,
   findProcessTargetFromNode,
   findTweetArticles,
   findXArticleTargets,
@@ -13,6 +14,10 @@ const DEFAULT_SETTINGS = {
   processViewportOnly: true,
 };
 const FORCE_TRANSLATE_ARTICLE_MESSAGE = "XAT_FORCE_TRANSLATE_ARTICLE";
+const MANUAL_ARTICLE_LOAD_TIMEOUT_MS = 5000;
+const MANUAL_ARTICLE_READY_ATTEMPTS = 50;
+const MANUAL_ARTICLE_STABLE_PASSES = 2;
+const MANUAL_ARTICLE_STABLE_INTERVAL_MS = 300;
 
 function getExtensionVersion() {
   return globalThis.chrome?.runtime?.getManifest?.()?.version || "unknown";
@@ -148,15 +153,93 @@ if (globalThis.__xatContentScriptLoaded) {
     viewportObserver.observe(tweet);
   }
 
+  function delay(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function waitForDocumentComplete(timeoutMs = MANUAL_ARTICLE_LOAD_TIMEOUT_MS) {
+    if (document.readyState === "complete") {
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      let finished = false;
+
+      function finish(loaded) {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        window.clearTimeout(timer);
+        document.removeEventListener("readystatechange", handleReadyStateChange);
+        window.removeEventListener("load", handleLoad);
+        resolve(loaded);
+      }
+
+      function handleReadyStateChange() {
+        if (document.readyState === "complete") {
+          finish(true);
+        }
+      }
+
+      function handleLoad() {
+        finish(true);
+      }
+
+      // X 是 SPA，页面 load 不等于文章正文已 hydrate；这里先等外层页面尽量完成，再继续等长文 DOM 稳定。
+      const timer = window.setTimeout(() => finish(false), timeoutMs);
+      document.addEventListener("readystatechange", handleReadyStateChange);
+      window.addEventListener("load", handleLoad, { once: true });
+    });
+  }
+
+  async function waitForStableArticleTarget() {
+    let previousTarget = null;
+    let previousText = "";
+    let stablePasses = 0;
+
+    for (let attempt = 0; attempt < MANUAL_ARTICLE_READY_ATTEMPTS; attempt += 1) {
+      scan();
+      const target = findXArticleTargets(document)[0] || null;
+      const text = target ? extractLongformText(target) : "";
+
+      if (target && text) {
+        if (target === previousTarget && text === previousText) {
+          stablePasses += 1;
+        } else {
+          previousTarget = target;
+          previousText = text;
+          stablePasses = 1;
+        }
+
+        if (stablePasses >= MANUAL_ARTICLE_STABLE_PASSES) {
+          return target;
+        }
+      } else {
+        previousTarget = target;
+        previousText = text;
+        stablePasses = 0;
+      }
+
+      // X Article 正文经常分批 hydrate；两次读取一致后再翻译，避免截取到半篇文章。
+      await delay(MANUAL_ARTICLE_STABLE_INTERVAL_MS);
+    }
+
+    return findXArticleTargets(document)[0] || null;
+  }
+
   async function translateCurrentArticle() {
     if (!canProcessCurrentPage()) {
       return { ok: false, error: "当前页面不支持文章翻译" };
     }
 
-    scan();
-    const target = findXArticleTargets(document)[0];
+    await waitForDocumentComplete();
+    const target = await waitForStableArticleTarget();
     if (!target) {
       return { ok: false, error: "当前页面未找到 X 长文" };
+    }
+    if (!extractLongformText(target)) {
+      return { ok: false, error: "文章正文还没加载完成，请稍后再试" };
     }
 
     if (target.dataset.xatState === "translated") {

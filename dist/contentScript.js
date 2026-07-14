@@ -469,6 +469,10 @@
     processViewportOnly: true
   };
   var FORCE_TRANSLATE_ARTICLE_MESSAGE = "XAT_FORCE_TRANSLATE_ARTICLE";
+  var MANUAL_ARTICLE_LOAD_TIMEOUT_MS = 5e3;
+  var MANUAL_ARTICLE_READY_ATTEMPTS = 50;
+  var MANUAL_ARTICLE_STABLE_PASSES = 2;
+  var MANUAL_ARTICLE_STABLE_INTERVAL_MS = 300;
   function getExtensionVersion() {
     return globalThis.chrome?.runtime?.getManifest?.()?.version || "unknown";
   }
@@ -560,6 +564,36 @@
       }
       tweet.dataset.xatObserved = "1";
       viewportObserver.observe(tweet);
+    }, delay = function(ms) {
+      return new Promise((resolve) => window.setTimeout(resolve, ms));
+    }, waitForDocumentComplete = function(timeoutMs = MANUAL_ARTICLE_LOAD_TIMEOUT_MS) {
+      if (document.readyState === "complete") {
+        return Promise.resolve(true);
+      }
+      return new Promise((resolve) => {
+        let finished = false;
+        function finish(loaded) {
+          if (finished) {
+            return;
+          }
+          finished = true;
+          window.clearTimeout(timer);
+          document.removeEventListener("readystatechange", handleReadyStateChange);
+          window.removeEventListener("load", handleLoad);
+          resolve(loaded);
+        }
+        function handleReadyStateChange() {
+          if (document.readyState === "complete") {
+            finish(true);
+          }
+        }
+        function handleLoad() {
+          finish(true);
+        }
+        const timer = window.setTimeout(() => finish(false), timeoutMs);
+        document.addEventListener("readystatechange", handleReadyStateChange);
+        window.addEventListener("load", handleLoad, { once: true });
+      });
     }, scan = function(root = document) {
       if (!canProcessCurrentPage()) {
         console.debug("[X Auto Translate] skipping unsupported X page");
@@ -591,14 +625,45 @@
         threshold: 0.01
       }
     );
+    async function waitForStableArticleTarget() {
+      let previousTarget = null;
+      let previousText = "";
+      let stablePasses = 0;
+      for (let attempt = 0; attempt < MANUAL_ARTICLE_READY_ATTEMPTS; attempt += 1) {
+        scan();
+        const target = findXArticleTargets(document)[0] || null;
+        const text = target ? extractLongformText(target) : "";
+        if (target && text) {
+          if (target === previousTarget && text === previousText) {
+            stablePasses += 1;
+          } else {
+            previousTarget = target;
+            previousText = text;
+            stablePasses = 1;
+          }
+          if (stablePasses >= MANUAL_ARTICLE_STABLE_PASSES) {
+            return target;
+          }
+        } else {
+          previousTarget = target;
+          previousText = text;
+          stablePasses = 0;
+        }
+        await delay(MANUAL_ARTICLE_STABLE_INTERVAL_MS);
+      }
+      return findXArticleTargets(document)[0] || null;
+    }
     async function translateCurrentArticle() {
       if (!canProcessCurrentPage()) {
         return { ok: false, error: "\u5F53\u524D\u9875\u9762\u4E0D\u652F\u6301\u6587\u7AE0\u7FFB\u8BD1" };
       }
-      scan();
-      const target = findXArticleTargets(document)[0];
+      await waitForDocumentComplete();
+      const target = await waitForStableArticleTarget();
       if (!target) {
         return { ok: false, error: "\u5F53\u524D\u9875\u9762\u672A\u627E\u5230 X \u957F\u6587" };
+      }
+      if (!extractLongformText(target)) {
+        return { ok: false, error: "\u6587\u7AE0\u6B63\u6587\u8FD8\u6CA1\u52A0\u8F7D\u5B8C\u6210\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5" };
       }
       if (target.dataset.xatState === "translated") {
         return { ok: true, message: "\u6587\u7AE0\u7FFB\u8BD1\uFF1A\u5DF2\u5B58\u5728\u8BD1\u6587" };
