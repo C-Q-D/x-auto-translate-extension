@@ -425,6 +425,195 @@ test("content script retranslates a longform leaf that X replaces as a whole ele
   dom.window.close();
 });
 
+test("article view toggle does not retrigger translation and keeps hydrated text original until requested", async () => {
+  const { dom, observed, observers, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <div data-block="true"><span data-text="true">Initial toggle text.</span></div>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  const toggle = document.querySelector("[data-xat-longform-toggle='1']");
+  const textLeaf = document.querySelector("[data-text='true']");
+  toggle.click();
+  await flushMutations();
+  await flushManualArticleWork();
+
+  assert.equal(toggle.textContent, "显示译文");
+  assert.equal(textLeaf.textContent, "Initial toggle text.");
+  assert.equal(sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").length, 1);
+
+  textLeaf.firstChild.data = "Hydrated while original is visible.";
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.deepEqual(
+    sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").map((entry) => entry.payload.text),
+    ["Initial toggle text.", "Hydrated while original is visible."],
+  );
+  assert.equal(textLeaf.textContent, "Hydrated while original is visible.");
+  assert.equal(toggle.textContent, "显示译文");
+  assert.equal(readView.dataset.xatState, "translated");
+
+  toggle.click();
+  await flushMutations();
+  assert.equal(textLeaf.textContent, "内容脚本测试译文");
+  assert.equal(toggle.textContent, "显示原文");
+  dom.window.close();
+});
+
+test("article view toggle preserves and restores a standalone longform title outside the read view", async () => {
+  const { dom, observed, observers, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <h1><span id="outside-title" class="css-1jxf684 r-bcqeeo r-1ttztb7 r-qvutc0 r-poiln3">Outside article title</span></h1>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <div data-block="true"><span data-text="true">Outside-title article body.</span></div>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  const title = document.querySelector("#outside-title");
+  observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  const toggle = readView.querySelector("[data-xat-longform-toggle='1']");
+  assert.equal(title.textContent, "内容脚本测试译文");
+  toggle.click();
+  await flushMutations();
+  await flushManualArticleWork();
+
+  assert.equal(title.textContent, "Outside article title");
+  assert.equal(title.getAttribute("data-xat-longform-block-translation"), "1");
+  assert.equal(toggle.textContent, "显示译文");
+
+  toggle.click();
+  await flushMutations();
+  await flushManualArticleWork();
+
+  assert.equal(title.textContent, "内容脚本测试译文");
+  assert.equal(title.getAttribute("data-xat-longform-block-translation"), "1");
+  assert.equal(toggle.textContent, "显示原文");
+  assert.deepEqual(
+    sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").map((entry) => entry.payload.text),
+    ["Outside article title", "Outside-title article body."],
+  );
+  dom.window.close();
+});
+
+test("content script recreates a removed article view toggle without requesting translation again", async () => {
+  const { dom, observed, observers, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <div data-block="true"><span data-text="true">Button recovery article.</span></div>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  const firstToggle = readView.querySelector("[data-xat-longform-toggle='1']");
+  firstToggle.remove();
+  await flushMutations();
+  await flushManualArticleWork();
+
+  const recoveredToggle = readView.querySelector("[data-xat-longform-toggle='1']");
+  assert.ok(recoveredToggle);
+  assert.notEqual(recoveredToggle, firstToggle);
+  assert.equal(readView.querySelectorAll("[data-xat-longform-toggle='1']").length, 1);
+  assert.equal(recoveredToggle.textContent, "显示原文");
+  assert.equal(sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").length, 1);
+  assert.equal(readView.dataset.xatState, "translated");
+  dom.window.close();
+});
+
+test("content script recovers a removed toggle in partial state without retrying failed blocks", async () => {
+  const { dom, observed, observers, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <div data-block="true"><span data-text="true">Successful partial block.</span></div>
+            <div data-block="true"><span data-text="true">Failed partial block.</span></div>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+  globalThis.chrome.runtime.sendMessage = (message, callback) => {
+    sentMessages.push(message);
+    if (message.type !== "XAT_TRANSLATE_TWEET") {
+      callback?.({ ok: true });
+      return;
+    }
+    if (message.payload.text === "Successful partial block.") {
+      callback?.({ ok: true, translation: "部分成功译文", provider: "tencent" });
+      return;
+    }
+    callback?.({ ok: false, error: "temporary-provider-failure" });
+  };
+
+  await loadContentScript();
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.equal(readView.dataset.xatState, "expanded");
+  const firstToggle = readView.querySelector("[data-xat-longform-toggle='1']");
+  assert.ok(firstToggle);
+  assert.equal(sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").length, 2);
+
+  firstToggle.remove();
+  await flushMutations();
+  await flushManualArticleWork();
+
+  const recoveredToggle = readView.querySelector("[data-xat-longform-toggle='1']");
+  assert.ok(recoveredToggle);
+  assert.notEqual(recoveredToggle, firstToggle);
+  assert.equal(sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").length, 2);
+  assert.equal(readView.dataset.xatState, "expanded");
+  dom.window.close();
+});
+
 test("manual article translation only processes X Article longform targets", async () => {
   const { dom, listeners, sentMessages } = setupDom(
     "https://x.com/0xwhrrari/status/2071337983899271175",

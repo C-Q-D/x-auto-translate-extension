@@ -12,6 +12,9 @@ const LONGFORM_CODE_BLOCK_SELECTOR = '[data-testid="markdown-code-block"]';
 const LONGFORM_GENERATED_LEAF_ATTRIBUTE = "data-xat-longform-text-leaf";
 const LONGFORM_BLOCK_TRANSLATION_ATTRIBUTE = "data-xat-longform-block-translation";
 const LONGFORM_TRANSLATED_TEXT_ATTRIBUTE = "data-xat-translated-text";
+const LONGFORM_VIEW_TOGGLE_SELECTOR = '[data-xat-longform-toggle="1"]';
+const LONGFORM_ORIGINAL_VIEW = "original";
+const LONGFORM_TRANSLATION_VIEW = "translation";
 const INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';
 const LONGFORM_CONTENT_TYPE = "longform";
 
@@ -131,6 +134,17 @@ export function findProcessTargetFromNode(node) {
   const standaloneLongform = element.closest?.(LONGFORM_READ_VIEW_SELECTOR);
   if (standaloneLongform && !standaloneLongform.closest?.('article[data-testid="tweet"]')) {
     return standaloneLongform;
+  }
+
+  // 独立长文的标题可能位于 read view 外部；把被选中的真实标题变化映射回对应阅读容器。
+  const scope = element.closest?.("main") || element.ownerDocument;
+  const standaloneCandidates = Array.from(scope?.querySelectorAll?.(LONGFORM_READ_VIEW_SELECTOR) || [])
+    .filter((candidate) => !candidate.closest?.('article[data-testid="tweet"]'));
+  for (const candidate of standaloneCandidates) {
+    const title = findLongformTitle(candidate);
+    if (title && (title === element || title.contains(element) || element.contains(title))) {
+      return candidate;
+    }
   }
 
   return element.closest?.('article[data-testid="tweet"]') || null;
@@ -426,15 +440,118 @@ export function isLongformTranslationComplete(tweet) {
 }
 
 /**
- * 把单个长文文字节点原位替换为译文。
+ * 在保留节点首尾空白的前提下更新长文叶节点文字。
+ *
+ * @param {Element} element 需要更新的文字叶节点。
+ * @param {string} text 应显示的规范化文字。
+ * @returns {void}
+ * @sideEffects 修改目标元素的 textContent，不改变元素属性和外层结构。
+ */
+function setLongformElementText(element, text) {
+  const renderedText = element.textContent || "";
+  const leadingWhitespace = renderedText.match(/^\s*/)?.[0] || "";
+  const trailingWhitespace = renderedText.match(/\s*$/)?.[0] || "";
+  element.textContent = `${leadingWhitespace}${text}${trailingWhitespace}`;
+}
+
+/**
+ * 同步长文视图切换按钮的可见文案和无障碍状态。
+ *
+ * @param {HTMLButtonElement} button 长文视图切换按钮。
+ * @param {boolean} showingOriginal 当前是否正在显示原文。
+ * @returns {void}
+ * @sideEffects 更新按钮文字、aria-pressed 和 title。
+ */
+function syncLongformViewToggle(button, showingOriginal) {
+  button.textContent = showingOriginal ? "显示译文" : "显示原文";
+  button.setAttribute("aria-pressed", showingOriginal ? "true" : "false");
+  button.setAttribute("title", showingOriginal ? "显示文章译文" : "显示文章原文");
+}
+
+/**
+ * 在 X Article 正文上方创建文章级原文/译文切换按钮。
+ * 切换只读取已经保存在文字叶节点上的原文和译文，不会发起新的翻译请求，也不会触碰代码块。
+ *
+ * @param {Element} tweet 长文处理目标，可以是 tweet article 或独立阅读容器。
+ * @returns {HTMLButtonElement | null} 已存在或新创建的切换按钮；正文尚不可用时返回 null。
+ * @sideEffects 插入一个按钮并注册点击事件；点击后更新文章视图状态和已翻译叶节点文字。
+ */
+export function ensureLongformViewToggle(tweet) {
+  const existing = tweet?.querySelector?.(LONGFORM_VIEW_TOGGLE_SELECTOR);
+  if (existing) {
+    syncLongformViewToggle(existing, tweet.dataset.xatLongformView === LONGFORM_ORIGINAL_VIEW);
+    return existing;
+  }
+
+  const target = findLongformTarget(tweet);
+  const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR)
+    ? target
+    : target?.closest?.(LONGFORM_READ_VIEW_SELECTOR);
+  const body = readView?.matches?.(LONGFORM_BODY_SELECTOR)
+    ? readView
+    : readView?.querySelector?.(LONGFORM_BODY_SELECTOR);
+  if (!body?.parentElement) {
+    return null;
+  }
+
+  const button = tweet.ownerDocument.createElement("button");
+  button.type = "button";
+  button.setAttribute("data-xat-longform-toggle", "1");
+  button.style.display = "inline-flex";
+  button.style.alignItems = "center";
+  button.style.margin = "8px 0";
+  button.style.padding = "0";
+  button.style.border = "0";
+  button.style.background = "transparent";
+  button.style.color = "rgb(29, 155, 240)";
+  button.style.fontSize = "14px";
+  button.style.fontWeight = "500";
+  button.style.lineHeight = "20px";
+  button.style.cursor = "pointer";
+  syncLongformViewToggle(button, tweet.dataset.xatLongformView === LONGFORM_ORIGINAL_VIEW);
+
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const showOriginal = tweet.dataset.xatLongformView !== LONGFORM_ORIGINAL_VIEW;
+    tweet.dataset.xatLongformView = showOriginal ? LONGFORM_ORIGINAL_VIEW : LONGFORM_TRANSLATION_VIEW;
+
+    for (const { element } of findLongformTextBlocks(tweet)) {
+      if (element.getAttribute(LONGFORM_BLOCK_TRANSLATION_ATTRIBUTE) !== "1") {
+        continue;
+      }
+      const visibleText = element.getAttribute(
+        showOriginal ? "data-xat-original-text" : LONGFORM_TRANSLATED_TEXT_ATTRIBUTE,
+      );
+      if (visibleText) {
+        setLongformElementText(element, visibleText);
+      }
+    }
+
+    syncLongformViewToggle(button, showOriginal);
+  });
+
+  // 放在阅读容器顶层，避开 Draft.js 管理的正文内部；若标题也在容器内，则紧随标题顶层块之后。
+  const title = findLongformTitle(readView);
+  let titleBlock = title && readView.contains(title) ? title : null;
+  while (titleBlock?.parentElement && titleBlock.parentElement !== readView) {
+    titleBlock = titleBlock.parentElement;
+  }
+  readView.insertBefore(button, titleBlock?.nextSibling || readView.firstChild);
+  return button;
+}
+
+/**
+ * 把单个长文文字节点原位记录并按当前视图模式显示。
  * 仅修改文字叶节点，保留链接、列表、标题、代码框和复制按钮等外层结构。
  *
+ * @param {Element} tweet 当前长文处理目标。
  * @param {{element: Element, text: string}} block 当前翻译单元及其原文。
  * @param {string} translation 第三方服务返回的译文。
- * @returns {Element | null} 完成替换的文字节点；参数无效时返回 null。
- * @sideEffects 保存原文和译文属性、写入翻译标记并修改节点文本。
+ * @returns {Element | null} 完成记录和显示的文字节点；参数无效时返回 null。
+ * @sideEffects 保存原文和译文属性、写入翻译标记、修改节点文本并确保切换按钮存在。
  */
-function replaceLongformTextBlock(block, translation) {
+function replaceLongformTextBlock(tweet, block, translation) {
   const element = block?.element;
   const normalizedTranslation = normalizeText(translation || "");
   if (!element || !normalizedTranslation) {
@@ -445,13 +562,14 @@ function replaceLongformTextBlock(block, translation) {
     element.setAttribute("data-xat-original-text", block.text);
   }
 
-  const renderedText = element.textContent || "";
-  const leadingWhitespace = renderedText.match(/^\s*/)?.[0] || "";
-  const trailingWhitespace = renderedText.match(/\s*$/)?.[0] || "";
   element.setAttribute(LONGFORM_BLOCK_TRANSLATION_ATTRIBUTE, "1");
   element.setAttribute("data-xat-translation", "1");
   element.setAttribute(LONGFORM_TRANSLATED_TEXT_ATTRIBUTE, normalizedTranslation);
-  element.textContent = `${leadingWhitespace}${normalizedTranslation}${trailingWhitespace}`;
+  const visibleText = tweet.dataset.xatLongformView === LONGFORM_ORIGINAL_VIEW
+    ? block.text
+    : normalizedTranslation;
+  setLongformElementText(element, visibleText);
+  ensureLongformViewToggle(tweet);
   return element;
 }
 
@@ -796,7 +914,7 @@ export function createTweetProcessor(options = {}) {
       }
 
       if (result?.translation) {
-        replaceLongformTextBlock(block, result.translation);
+        replaceLongformTextBlock(tweet, block, result.translation);
       } else {
         failedElements.add(block.element);
         failures.push(result || { ok: false, error: "empty-result" });

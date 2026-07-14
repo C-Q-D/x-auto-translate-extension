@@ -778,7 +778,7 @@ test("uses only non-interactive leaf elements when longform data-text markers ar
   assert.equal(readView.querySelector("p").textContent, "Plain paragraph translated");
   assert.equal(readView.querySelector("a").textContent, "Plain link translated");
   assert.equal(readView.querySelector("a").getAttribute("href"), "https://example.com/plain");
-  assert.equal(readView.querySelector("button").textContent, "Copy article");
+  assert.equal(readView.querySelector("[data-testid='longformRichTextComponent'] button").textContent, "Copy article");
 });
 
 test("wraps and translates bare inline text around a link without removing the link", async () => {
@@ -889,6 +889,72 @@ test("processor replaces each X Article block in place without creating an aggre
   assert.equal(tweet.querySelectorAll("[data-xat-longform-block-translation='1']").length, 4);
   assert.equal(isLongformTranslationComplete(tweet), true);
   assert.equal(tweet.querySelector("[data-xat-status]"), null);
+});
+
+test("processor adds one article view toggle that switches original and translated text without new requests", async () => {
+  setupDom(`
+    <article data-testid="tweet">
+      <a href="/writer/status/2071912657133973977"><time>2小时</time></a>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title"><span>Original title</span></div>
+        <div data-testid="longformRichTextComponent">
+          <div data-block="true">
+            <span data-text="true">Read </span>
+            <a href="https://example.com/docs"><span data-text="true">the docs</span></a>
+          </div>
+          <section data-block="true">
+            <div data-testid="markdown-code-block"><pre><code>const answer = 42;</code></pre></div>
+          </section>
+        </div>
+      </div>
+    </article>
+  `);
+  const tweet = document.querySelector("article");
+  const translations = new Map([
+    ["Original title", "译文标题"],
+    ["Read", "阅读"],
+    ["the docs", "这些文档"],
+  ]);
+  const requests = [];
+  const processor = createTweetProcessor({
+    wait: async () => {},
+    now: () => 1000,
+    requestTranslation: async ({ text }) => {
+      requests.push(text);
+      return { ok: true, translation: translations.get(text), provider: "tencent" };
+    },
+  });
+
+  await processor.processTweet(tweet);
+
+  const toggle = tweet.querySelector("[data-xat-longform-toggle='1']");
+  assert.ok(toggle);
+  assert.equal(tweet.querySelectorAll("[data-xat-longform-toggle='1']").length, 1);
+  assert.equal(toggle.textContent, "显示原文");
+  assert.equal(tweet.querySelector("[data-testid='twitter-article-title']").textContent, "译文标题");
+  assert.equal(tweet.querySelector("[data-testid='markdown-code-block'] code").textContent, "const answer = 42;");
+
+  toggle.click();
+
+  assert.equal(toggle.textContent, "显示译文");
+  assert.equal(tweet.dataset.xatLongformView, "original");
+  assert.equal(tweet.querySelector("[data-testid='twitter-article-title']").textContent, "Original title");
+  assert.equal(
+    tweet.querySelector("[data-testid='longformRichTextComponent'] [data-block='true']").textContent.replace(/\s+/g, " ").trim(),
+    "Read the docs",
+  );
+  assert.equal(tweet.querySelector("a[href='https://example.com/docs']").getAttribute("href"), "https://example.com/docs");
+  assert.equal(tweet.querySelector("[data-testid='markdown-code-block'] code").textContent, "const answer = 42;");
+  assert.deepEqual(requests, ["Original title", "Read", "the docs"]);
+
+  toggle.click();
+
+  assert.equal(toggle.textContent, "显示原文");
+  assert.equal(tweet.dataset.xatLongformView, "translation");
+  assert.equal(tweet.querySelector("[data-testid='twitter-article-title']").textContent, "译文标题");
+  assert.equal(tweet.querySelector("a[href='https://example.com/docs']").textContent, "这些文档");
+  assert.equal(tweet.querySelector("[data-testid='markdown-code-block'] code").textContent, "const answer = 42;");
+  assert.deepEqual(requests, ["Original title", "Read", "the docs"]);
 });
 
 test("processor renders each X Article block as soon as that block translation resolves", async () => {

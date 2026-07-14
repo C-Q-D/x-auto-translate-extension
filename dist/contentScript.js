@@ -12,6 +12,9 @@
   var LONGFORM_GENERATED_LEAF_ATTRIBUTE = "data-xat-longform-text-leaf";
   var LONGFORM_BLOCK_TRANSLATION_ATTRIBUTE = "data-xat-longform-block-translation";
   var LONGFORM_TRANSLATED_TEXT_ATTRIBUTE = "data-xat-translated-text";
+  var LONGFORM_VIEW_TOGGLE_SELECTOR = '[data-xat-longform-toggle="1"]';
+  var LONGFORM_ORIGINAL_VIEW = "original";
+  var LONGFORM_TRANSLATION_VIEW = "translation";
   var INTERACTIVE_SELECTOR = 'button, [role="button"], a[href], [tabindex]:not([tabindex="-1"])';
   var LONGFORM_CONTENT_TYPE = "longform";
   var TRANSLATE_LABELS = [
@@ -93,6 +96,14 @@
     const standaloneLongform = element.closest?.(LONGFORM_READ_VIEW_SELECTOR);
     if (standaloneLongform && !standaloneLongform.closest?.('article[data-testid="tweet"]')) {
       return standaloneLongform;
+    }
+    const scope = element.closest?.("main") || element.ownerDocument;
+    const standaloneCandidates = Array.from(scope?.querySelectorAll?.(LONGFORM_READ_VIEW_SELECTOR) || []).filter((candidate) => !candidate.closest?.('article[data-testid="tweet"]'));
+    for (const candidate of standaloneCandidates) {
+      const title = findLongformTitle(candidate);
+      if (title && (title === element || title.contains(element) || element.contains(title))) {
+        return candidate;
+      }
     }
     return element.closest?.('article[data-testid="tweet"]') || null;
   }
@@ -263,7 +274,71 @@
     const blocks = findLongformTextBlocks(tweet);
     return blocks.length > 0 && blocks.every(({ element }) => element.getAttribute(LONGFORM_BLOCK_TRANSLATION_ATTRIBUTE) === "1");
   }
-  function replaceLongformTextBlock(block, translation) {
+  function setLongformElementText(element, text) {
+    const renderedText = element.textContent || "";
+    const leadingWhitespace = renderedText.match(/^\s*/)?.[0] || "";
+    const trailingWhitespace = renderedText.match(/\s*$/)?.[0] || "";
+    element.textContent = `${leadingWhitespace}${text}${trailingWhitespace}`;
+  }
+  function syncLongformViewToggle(button, showingOriginal) {
+    button.textContent = showingOriginal ? "\u663E\u793A\u8BD1\u6587" : "\u663E\u793A\u539F\u6587";
+    button.setAttribute("aria-pressed", showingOriginal ? "true" : "false");
+    button.setAttribute("title", showingOriginal ? "\u663E\u793A\u6587\u7AE0\u8BD1\u6587" : "\u663E\u793A\u6587\u7AE0\u539F\u6587");
+  }
+  function ensureLongformViewToggle(tweet) {
+    const existing = tweet?.querySelector?.(LONGFORM_VIEW_TOGGLE_SELECTOR);
+    if (existing) {
+      syncLongformViewToggle(existing, tweet.dataset.xatLongformView === LONGFORM_ORIGINAL_VIEW);
+      return existing;
+    }
+    const target = findLongformTarget(tweet);
+    const readView = target?.matches?.(LONGFORM_READ_VIEW_SELECTOR) ? target : target?.closest?.(LONGFORM_READ_VIEW_SELECTOR);
+    const body = readView?.matches?.(LONGFORM_BODY_SELECTOR) ? readView : readView?.querySelector?.(LONGFORM_BODY_SELECTOR);
+    if (!body?.parentElement) {
+      return null;
+    }
+    const button = tweet.ownerDocument.createElement("button");
+    button.type = "button";
+    button.setAttribute("data-xat-longform-toggle", "1");
+    button.style.display = "inline-flex";
+    button.style.alignItems = "center";
+    button.style.margin = "8px 0";
+    button.style.padding = "0";
+    button.style.border = "0";
+    button.style.background = "transparent";
+    button.style.color = "rgb(29, 155, 240)";
+    button.style.fontSize = "14px";
+    button.style.fontWeight = "500";
+    button.style.lineHeight = "20px";
+    button.style.cursor = "pointer";
+    syncLongformViewToggle(button, tweet.dataset.xatLongformView === LONGFORM_ORIGINAL_VIEW);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const showOriginal = tweet.dataset.xatLongformView !== LONGFORM_ORIGINAL_VIEW;
+      tweet.dataset.xatLongformView = showOriginal ? LONGFORM_ORIGINAL_VIEW : LONGFORM_TRANSLATION_VIEW;
+      for (const { element } of findLongformTextBlocks(tweet)) {
+        if (element.getAttribute(LONGFORM_BLOCK_TRANSLATION_ATTRIBUTE) !== "1") {
+          continue;
+        }
+        const visibleText = element.getAttribute(
+          showOriginal ? "data-xat-original-text" : LONGFORM_TRANSLATED_TEXT_ATTRIBUTE
+        );
+        if (visibleText) {
+          setLongformElementText(element, visibleText);
+        }
+      }
+      syncLongformViewToggle(button, showOriginal);
+    });
+    const title = findLongformTitle(readView);
+    let titleBlock = title && readView.contains(title) ? title : null;
+    while (titleBlock?.parentElement && titleBlock.parentElement !== readView) {
+      titleBlock = titleBlock.parentElement;
+    }
+    readView.insertBefore(button, titleBlock?.nextSibling || readView.firstChild);
+    return button;
+  }
+  function replaceLongformTextBlock(tweet, block, translation) {
     const element = block?.element;
     const normalizedTranslation = normalizeText(translation || "");
     if (!element || !normalizedTranslation) {
@@ -272,13 +347,12 @@
     if (!element.hasAttribute("data-xat-original-text")) {
       element.setAttribute("data-xat-original-text", block.text);
     }
-    const renderedText = element.textContent || "";
-    const leadingWhitespace = renderedText.match(/^\s*/)?.[0] || "";
-    const trailingWhitespace = renderedText.match(/\s*$/)?.[0] || "";
     element.setAttribute(LONGFORM_BLOCK_TRANSLATION_ATTRIBUTE, "1");
     element.setAttribute("data-xat-translation", "1");
     element.setAttribute(LONGFORM_TRANSLATED_TEXT_ATTRIBUTE, normalizedTranslation);
-    element.textContent = `${leadingWhitespace}${normalizedTranslation}${trailingWhitespace}`;
+    const visibleText = tweet.dataset.xatLongformView === LONGFORM_ORIGINAL_VIEW ? block.text : normalizedTranslation;
+    setLongformElementText(element, visibleText);
+    ensureLongformViewToggle(tweet);
     return element;
   }
   function extractLongformText(tweet) {
@@ -516,7 +590,7 @@
           return;
         }
         if (result?.translation) {
-          replaceLongformTextBlock(block, result.translation);
+          replaceLongformTextBlock(tweet, block, result.translation);
         } else {
           failedElements.add(block.element);
           failures.push(result || { ok: false, error: "empty-result" });
@@ -848,9 +922,9 @@
         observeTweet(tweet);
       }
     }, isExtensionOwnedMutation = function(mutation) {
-      const selector = "[data-xat-status], [data-xat-translation]";
-      const removedTranslatedLeaf = Array.from(mutation.removedNodes).some((node) => node?.nodeType === 1 && (node.matches?.("[data-xat-longform-block-translation='1']") || node.querySelector?.("[data-xat-longform-block-translation='1']")));
-      if (removedTranslatedLeaf) {
+      const selector = "[data-xat-status], [data-xat-translation], [data-xat-longform-toggle]";
+      const removedExtensionNode = Array.from(mutation.removedNodes).some((node) => node?.nodeType === 1 && (node.matches?.("[data-xat-longform-block-translation='1']") || node.querySelector?.("[data-xat-longform-block-translation='1']") || node.matches?.("[data-xat-longform-toggle='1']") || node.querySelector?.("[data-xat-longform-toggle='1']")));
+      if (removedExtensionNode) {
         return false;
       }
       const targetElement = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement;
@@ -864,8 +938,10 @@
       if (!translatedLeaf) {
         return false;
       }
-      const expectedTranslation = translatedLeaf.getAttribute("data-xat-translated-text") || "";
-      if (!expectedTranslation || translatedLeaf.textContent.trim() === expectedTranslation) {
+      const processTarget = findProcessTargetFromNode(translatedLeaf);
+      const expectedTextAttribute = processTarget?.dataset.xatLongformView === "original" ? "data-xat-original-text" : "data-xat-translated-text";
+      const expectedText = translatedLeaf.getAttribute(expectedTextAttribute) || "";
+      if (!expectedText || translatedLeaf.textContent.trim() === expectedText) {
         return false;
       }
       translatedLeaf.removeAttribute("data-xat-longform-block-translation");
@@ -873,6 +949,9 @@
       translatedLeaf.removeAttribute("data-xat-original-text");
       translatedLeaf.removeAttribute("data-xat-translated-text");
       return true;
+    }, isOnlyLongformToggleRemoval = function(mutation) {
+      const removedNodes = Array.from(mutation.removedNodes);
+      return mutation.addedNodes.length === 0 && removedNodes.length === 1 && removedNodes[0]?.nodeType === 1 && removedNodes[0].matches?.("[data-xat-longform-toggle='1']");
     };
     globalThis.__xatContentScriptLoaded = true;
     const processor = createTweetProcessor({
@@ -963,6 +1042,7 @@
     globalThis.__xatScan = scan;
     const mutationObserver = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
+        const onlyLongformToggleRemoval = isOnlyLongformToggleRemoval(mutation);
         const invalidatedLongformTranslation = invalidateHydratedLongformTranslation(mutation);
         if (!invalidatedLongformTranslation && isExtensionOwnedMutation(mutation)) {
           continue;
@@ -979,6 +1059,14 @@
         }
         const changedTarget = findProcessTargetFromNode(mutation.target);
         const state = changedTarget?.dataset.xatState;
+        const hasTranslatedLongformText = changedTarget && findLongformTextBlocks(changedTarget).some(({ element }) => element.getAttribute("data-xat-longform-block-translation") === "1");
+        const needsToggleRecovery = hasTranslatedLongformText && !changedTarget.querySelector("[data-xat-longform-toggle='1']");
+        if (needsToggleRecovery) {
+          ensureLongformViewToggle(changedTarget);
+        }
+        if (onlyLongformToggleRemoval) {
+          continue;
+        }
         const needsHydrationRetry = state === "expanded";
         const hasNewLongformText = state === "translated" && !isLongformTranslationComplete(changedTarget);
         if (changedTarget && (needsHydrationRetry || hasNewLongformText)) {

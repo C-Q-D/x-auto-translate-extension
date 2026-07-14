@@ -1,6 +1,8 @@
 import {
   createTweetProcessor,
+  ensureLongformViewToggle,
   extractLongformText,
+  findLongformTextBlocks,
   findProcessTargetFromNode,
   findTweetArticles,
   findXArticleTargets,
@@ -343,15 +345,17 @@ if (globalThis.__xatContentScriptLoaded) {
    * @sideEffects 本函数只检查 DOM 标记，不修改页面。
    */
   function isExtensionOwnedMutation(mutation) {
-    const selector = "[data-xat-status], [data-xat-translation]";
-    const removedTranslatedLeaf = Array.from(mutation.removedNodes).some((node) => (
+    const selector = "[data-xat-status], [data-xat-translation], [data-xat-longform-toggle]";
+    const removedExtensionNode = Array.from(mutation.removedNodes).some((node) => (
       node?.nodeType === 1 && (
         node.matches?.("[data-xat-longform-block-translation='1']") ||
-        node.querySelector?.("[data-xat-longform-block-translation='1']")
+        node.querySelector?.("[data-xat-longform-block-translation='1']") ||
+        node.matches?.("[data-xat-longform-toggle='1']") ||
+        node.querySelector?.("[data-xat-longform-toggle='1']")
       )
     ));
-    if (removedTranslatedLeaf) {
-      // 扩展只改叶节点文字，不会移除已翻译叶元素；元素被整体替换一定来自 X 的 hydration。
+    if (removedExtensionNode) {
+      // 扩展只改文字或按钮文案，不会移除已翻译叶元素或切换按钮；移除动作来自 X 的重渲染。
       return false;
     }
 
@@ -380,8 +384,12 @@ if (globalThis.__xatContentScriptLoaded) {
       return false;
     }
 
-    const expectedTranslation = translatedLeaf.getAttribute("data-xat-translated-text") || "";
-    if (!expectedTranslation || translatedLeaf.textContent.trim() === expectedTranslation) {
+    const processTarget = findProcessTargetFromNode(translatedLeaf);
+    const expectedTextAttribute = processTarget?.dataset.xatLongformView === "original"
+      ? "data-xat-original-text"
+      : "data-xat-translated-text";
+    const expectedText = translatedLeaf.getAttribute(expectedTextAttribute) || "";
+    if (!expectedText || translatedLeaf.textContent.trim() === expectedText) {
       return false;
     }
 
@@ -392,8 +400,25 @@ if (globalThis.__xatContentScriptLoaded) {
     return true;
   }
 
+  /**
+   * 判断变化是否只是移除了文章视图切换按钮。
+   * 纯按钮移除只需要恢复 UI，不代表正文 hydrate，也不应绕过部分失败节点的重试冷却。
+   *
+   * @param {MutationRecord} mutation MutationObserver 提供的变化记录。
+   * @returns {boolean} 仅移除一个切换按钮且没有新增节点时返回 true。
+   * @sideEffects 本函数只检查增删节点，不修改页面。
+   */
+  function isOnlyLongformToggleRemoval(mutation) {
+    const removedNodes = Array.from(mutation.removedNodes);
+    return mutation.addedNodes.length === 0 &&
+      removedNodes.length === 1 &&
+      removedNodes[0]?.nodeType === 1 &&
+      removedNodes[0].matches?.("[data-xat-longform-toggle='1']");
+  }
+
   const mutationObserver = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
+      const onlyLongformToggleRemoval = isOnlyLongformToggleRemoval(mutation);
       const invalidatedLongformTranslation = invalidateHydratedLongformTranslation(mutation);
       if (!invalidatedLongformTranslation && isExtensionOwnedMutation(mutation)) {
         continue;
@@ -413,6 +438,18 @@ if (globalThis.__xatContentScriptLoaded) {
 
       const changedTarget = findProcessTargetFromNode(mutation.target);
       const state = changedTarget?.dataset.xatState;
+      const hasTranslatedLongformText = changedTarget && findLongformTextBlocks(changedTarget).some(({ element }) => (
+        element.getAttribute("data-xat-longform-block-translation") === "1"
+      ));
+      const needsToggleRecovery = hasTranslatedLongformText &&
+        !changedTarget.querySelector("[data-xat-longform-toggle='1']");
+      if (needsToggleRecovery) {
+        // X 可能重建阅读容器并移除扩展按钮；已有节点译文足以无请求地恢复切换入口。
+        ensureLongformViewToggle(changedTarget);
+      }
+      if (onlyLongformToggleRemoval) {
+        continue;
+      }
       const needsHydrationRetry = state === "expanded";
       const hasNewLongformText = state === "translated" && !isLongformTranslationComplete(changedTarget);
       if (changedTarget && (needsHydrationRetry || hasNewLongformText)) {
