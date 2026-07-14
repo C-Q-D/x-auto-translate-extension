@@ -1,3 +1,5 @@
+// 本测试文件覆盖腾讯云机器翻译 provider 的签名、错误分类、长文本分块和请求契约。
+// provider 是第三方翻译管线的一环，测试需要保护限额边界和长文聚合顺序。
 import assert from "node:assert/strict";
 import { createHash, createHmac, webcrypto } from "node:crypto";
 import test from "node:test";
@@ -185,8 +187,58 @@ test("Tencent provider maps unsupported source languages without disabling the p
   });
 });
 
-test("Tencent provider rejects text longer than 2000 code points without a request", async () => {
-  const fetchMock = createFetchMock(createResponse(200, {}));
+test("Tencent provider splits long text into limited concurrent requests and merges translations", async () => {
+  let activeRequests = 0;
+  let maxActiveRequests = 0;
+  const calls = [];
+  const provider = createTencentTranslationProvider({
+    secretId: SECRET_ID,
+    secretKey: SECRET_KEY,
+    fetch: async (url, options) => {
+      activeRequests += 1;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+      calls.push([url, options]);
+      const callIndex = calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      activeRequests -= 1;
+      const { SourceText } = JSON.parse(options.body);
+      return createResponse(200, {
+        Response: {
+          RequestId: `request-${callIndex}`,
+          Source: "en",
+          Target: "zh",
+          TargetText: `译文${callIndex}:${SourceText.length}`,
+          UsedAmount: SourceText.length,
+        },
+      });
+    },
+    crypto: webcrypto,
+    now: () => NOW_MS,
+    maxConcurrentRequests: 3,
+  });
+
+  const result = await provider.translate({ text: "a".repeat(4500), targetLanguage: "zh" });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.translation, "译文1:2000\n\n译文2:2000\n\n译文3:500");
+  assert.equal(result.usage.characters, 4500);
+  assert.equal(calls.length, 3);
+  assert.equal(maxActiveRequests, 3);
+  for (const [, options] of calls) {
+    assert.ok(JSON.parse(options.body).SourceText.length <= 2000);
+  }
+});
+
+test("Tencent provider returns the first failed chunk result when long text chunk translation fails", async () => {
+  const fetchMock = createFetchMock(createResponse(200, {
+    Response: {
+      Error: {
+        Code: "LimitExceeded.LimitedAccessFrequency",
+        Message: "Rate limited",
+      },
+      RequestId: "request-id",
+    },
+  }));
   const provider = createTencentTranslationProvider({
     secretId: SECRET_ID,
     secretKey: SECRET_KEY,
@@ -198,12 +250,13 @@ test("Tencent provider rejects text longer than 2000 code points without a reque
 
   assert.deepEqual(result, {
     ok: false,
-    error: "tencent-text-too-long",
-    category: "invalid_request",
-    fallback: false,
-    retryable: false,
+    error: "tencent-rate-limited",
+    category: "rate_limited",
+    fallback: true,
+    retryable: true,
+    providerCode: "LimitExceeded.LimitedAccessFrequency",
   });
-  assert.equal(fetchMock.calls.length, 0);
+  assert.equal(fetchMock.calls.length, 2);
 });
 
 test("Tencent provider reports missing credentials before signing", async () => {

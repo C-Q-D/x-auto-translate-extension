@@ -1,3 +1,5 @@
+// 本文件封装腾讯云机器翻译 TextTranslate provider，负责签名、请求、错误分类和长文本分块。
+// 腾讯云单次文本翻译有 2000 字符限制，因此 provider 内部会把超长文本拆成多个安全分块后再聚合结果。
 const TENCENT_ENDPOINT = "https://tmt.tencentcloudapi.com/";
 const TENCENT_HOST = "tmt.tencentcloudapi.com";
 const TENCENT_SERVICE = "tmt";
@@ -5,6 +7,7 @@ const TENCENT_ACTION = "TextTranslate";
 const TENCENT_VERSION = "2018-03-21";
 const TENCENT_ALGORITHM = "TC3-HMAC-SHA256";
 const TENCENT_MAX_TEXT_LENGTH = 2000;
+const TENCENT_DEFAULT_CONCURRENCY = 3;
 
 const textEncoder = new TextEncoder();
 
@@ -35,6 +38,32 @@ async function hmacSha256(cryptoApi, key, value) {
 
 function codePointLength(value) {
   return Array.from(value).length;
+}
+
+function splitTextByCodePointLimit(text, limit = TENCENT_MAX_TEXT_LENGTH) {
+  const characters = Array.from(text);
+  const chunks = [];
+  for (let start = 0; start < characters.length; start += limit) {
+    chunks.push(characters.slice(start, start + limit).join(""));
+  }
+  return chunks;
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  // 腾讯云文本翻译存在频率限制；这里用小并发池提升长文速度，同时避免瞬时请求数过高。
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }));
+
+  return results;
 }
 
 function createFailure(error, category, options = {}) {
@@ -158,14 +187,14 @@ export function createTencentTranslationProvider(config = {}) {
   const cryptoApi = config.crypto || globalThis.crypto;
   const now = config.now || (() => Date.now());
   const region = config.region || "ap-guangzhou";
+  const maxConcurrentRequests = Math.max(
+    1,
+    Math.min(Number(config.maxConcurrentRequests || TENCENT_DEFAULT_CONCURRENCY), TENCENT_DEFAULT_CONCURRENCY),
+  );
 
-  async function translate(request = {}) {
-    const text = typeof request.text === "string" ? request.text.trim() : "";
+  async function translateSingleText(text, request = {}) {
     if (!text) {
       return createFailure("tencent-text-required", "invalid_request", { fallback: false });
-    }
-    if (codePointLength(text) > TENCENT_MAX_TEXT_LENGTH) {
-      return createFailure("tencent-text-too-long", "invalid_request", { fallback: false });
     }
     if (!config.secretId || !config.secretKey) {
       return createFailure("tencent-credentials-missing", "auth_failed");
@@ -243,6 +272,35 @@ export function createTencentTranslationProvider(config = {}) {
       targetLanguage: result.Target || request.targetLanguage || "zh",
       usage: {
         characters: Number(result.UsedAmount ?? codePointLength(text)),
+      },
+    };
+  }
+
+  async function translate(request = {}) {
+    const text = typeof request.text === "string" ? request.text.trim() : "";
+    if (!text) {
+      return createFailure("tencent-text-required", "invalid_request", { fallback: false });
+    }
+
+    const chunks = splitTextByCodePointLimit(text);
+    if (chunks.length === 1) {
+      return translateSingleText(chunks[0], request);
+    }
+
+    const results = await mapWithConcurrency(chunks, maxConcurrentRequests, (chunk) => translateSingleText(chunk, request));
+    const failed = results.find((result) => !result?.ok);
+    if (failed) {
+      return failed;
+    }
+
+    return {
+      ok: true,
+      translation: results.map((result) => result.translation).join("\n\n"),
+      provider: "tencent",
+      sourceLanguage: results[0]?.sourceLanguage || request.sourceLanguage || "auto",
+      targetLanguage: results[0]?.targetLanguage || request.targetLanguage || "zh",
+      usage: {
+        characters: results.reduce((sum, result) => sum + Number(result.usage?.characters || 0), 0),
       },
     };
   }
