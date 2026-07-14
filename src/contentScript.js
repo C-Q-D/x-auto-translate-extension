@@ -4,6 +4,7 @@ import {
   findProcessTargetFromNode,
   findTweetArticles,
   findXArticleTargets,
+  isLongformTranslationComplete,
   shouldProcessTimelinePage,
 } from "./tweetProcessor.js";
 import { sendRuntimeMessage } from "./runtimeMessaging.js";
@@ -50,7 +51,7 @@ function recordDiagnostic(event, payload = {}) {
     type: "XAT_DIAGNOSTIC_EVENT",
     payload: { event, extensionVersion: getExtensionVersion(), ...payload },
   }).then(() => {
-    // Ignore diagnostics transport errors; they must never affect tweet processing.
+    // 诊断上报失败不能影响帖子和长文的主处理流程。
   });
 }
 
@@ -275,15 +276,6 @@ if (globalThis.__xatContentScriptLoaded) {
     return findCurrentArticleTarget();
   }
 
-  function hasRenderedArticleTranslation(target) {
-    const embeddedTranslation = target?.querySelector?.("[data-xat-longform-translation]");
-    const siblingTranslation = target?.nextElementSibling?.matches?.("[data-xat-longform-translation]")
-      ? target.nextElementSibling
-      : null;
-    const translationNode = embeddedTranslation || siblingTranslation;
-    return Boolean(translationNode?.textContent?.trim());
-  }
-
   async function translateCurrentArticle() {
     if (!canProcessCurrentPage()) {
       return { ok: false, error: "当前页面不支持文章翻译" };
@@ -298,7 +290,7 @@ if (globalThis.__xatContentScriptLoaded) {
       return { ok: false, error: "文章正文还没加载完成，请稍后再试" };
     }
 
-    if (target.dataset.xatState === "translated" && hasRenderedArticleTranslation(target)) {
+    if (target.dataset.xatState === "translated" && isLongformTranslationComplete(target)) {
       return { ok: true, message: "文章翻译：已存在译文" };
     }
     if (target.dataset.xatState === "processing") {
@@ -342,8 +334,71 @@ if (globalThis.__xatContentScriptLoaded) {
   }
   globalThis.__xatScan = scan;
 
+  /**
+   * 判断一次 DOM 变化是否由扩展自身的状态或译文替换产生。
+   * 过滤这些变化可以避免部分失败状态反复触发自身、形成无休止重试。
+   *
+   * @param {MutationRecord} mutation MutationObserver 提供的变化记录。
+   * @returns {boolean} 变化目标或增删节点属于扩展状态/译文时返回 true。
+   * @sideEffects 本函数只检查 DOM 标记，不修改页面。
+   */
+  function isExtensionOwnedMutation(mutation) {
+    const selector = "[data-xat-status], [data-xat-translation]";
+    const removedTranslatedLeaf = Array.from(mutation.removedNodes).some((node) => (
+      node?.nodeType === 1 && (
+        node.matches?.("[data-xat-longform-block-translation='1']") ||
+        node.querySelector?.("[data-xat-longform-block-translation='1']")
+      )
+    ));
+    if (removedTranslatedLeaf) {
+      // 扩展只改叶节点文字，不会移除已翻译叶元素；元素被整体替换一定来自 X 的 hydration。
+      return false;
+    }
+
+    const targetElement = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement;
+    if (targetElement?.closest?.(selector)) {
+      return true;
+    }
+
+    return [...mutation.addedNodes, ...mutation.removedNodes].some((node) => (
+      node?.nodeType === 1 && (node.matches?.(selector) || node.querySelector?.(selector))
+    ));
+  }
+
+  /**
+   * 识别 X 对已翻译长文叶节点进行的原地 hydration，并清除已经失效的翻译状态。
+   * 扩展自身写入译文时，当前文本会与保存的译文一致；只有内容不一致才视为 X 的后续更新。
+   *
+   * @param {MutationRecord} mutation MutationObserver 提供的变化记录。
+   * @returns {boolean} 清除了一个失效长文翻译标记时返回 true。
+   * @sideEffects 删除旧原文、旧译文和完成标记，使调度器能够按新文字重新翻译。
+   */
+  function invalidateHydratedLongformTranslation(mutation) {
+    const targetElement = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement;
+    const translatedLeaf = targetElement?.closest?.("[data-xat-longform-block-translation='1']");
+    if (!translatedLeaf) {
+      return false;
+    }
+
+    const expectedTranslation = translatedLeaf.getAttribute("data-xat-translated-text") || "";
+    if (!expectedTranslation || translatedLeaf.textContent.trim() === expectedTranslation) {
+      return false;
+    }
+
+    translatedLeaf.removeAttribute("data-xat-longform-block-translation");
+    translatedLeaf.removeAttribute("data-xat-translation");
+    translatedLeaf.removeAttribute("data-xat-original-text");
+    translatedLeaf.removeAttribute("data-xat-translated-text");
+    return true;
+  }
+
   const mutationObserver = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
+      const invalidatedLongformTranslation = invalidateHydratedLongformTranslation(mutation);
+      if (!invalidatedLongformTranslation && isExtensionOwnedMutation(mutation)) {
+        continue;
+      }
+
       for (const node of mutation.addedNodes) {
         if (!(node instanceof HTMLElement)) {
           continue;
@@ -357,8 +412,14 @@ if (globalThis.__xatContentScriptLoaded) {
       }
 
       const changedTarget = findProcessTargetFromNode(mutation.target);
-      if (changedTarget && changedTarget.dataset.xatState === "expanded") {
-        // 独立 X Article 正文可能在外壳处理失败后才 hydrate；DOM 变化说明内容已有机会变完整，需绕过短冷却。
+      const state = changedTarget?.dataset.xatState;
+      const needsHydrationRetry = state === "expanded";
+      const hasNewLongformText = state === "translated" && !isLongformTranslationComplete(changedTarget);
+      if (changedTarget && (needsHydrationRetry || hasNewLongformText)) {
+        // 长文节点数量按当前文章动态变化；新增文字节点出现时绕过冷却，只补译没有块级标记的内容。
+        if (hasNewLongformText) {
+          delete changedTarget.dataset.xatState;
+        }
         delete changedTarget.dataset.xatLastAttempt;
         scheduleTweet(changedTarget);
       }
@@ -367,6 +428,7 @@ if (globalThis.__xatContentScriptLoaded) {
 
   scan();
   mutationObserver.observe(document.documentElement, {
+    characterData: true,
     childList: true,
     subtree: true,
   });

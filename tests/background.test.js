@@ -552,7 +552,95 @@ test("background routes longform text directly to configured third-party provide
   assert.equal(thirdPartyCalls.length, 1);
   assert.equal(thirdPartyCalls[0].text, "Longform title and body");
   assert.equal(thirdPartyCalls[0].targetLanguage, "zh");
-  assert.equal(storage.xatTranslationCache.translations[TWEET_ID].provider, "tencent");
+  const cachedEntries = Object.values(storage.xatTranslationCache.translations);
+  assert.equal(cachedEntries.length, 1);
+  assert.equal(cachedEntries[0].provider, "tencent");
+});
+
+test("background caches different longform DOM text nodes independently", async () => {
+  const { chrome } = createChromeMock({
+    initialStorage: {
+      xatProviderSettings: {
+        tencent: {
+          secretId: "AKIDEXAMPLE",
+          secretKey: "example-secret",
+          region: "ap-guangzhou",
+        },
+      },
+    },
+  });
+  const providerCalls = [];
+  const controller = createBackgroundController(chrome, {
+    now: () => 1710000000000,
+    tencentProviderFactory() {
+      return {
+        id: "tencent",
+        async translate(request) {
+          providerCalls.push(request.text);
+          return { ok: true, translation: `${request.text} 的译文`, provider: "tencent" };
+        },
+      };
+    },
+  });
+
+  const first = await controller.translateTweet({
+    ...METADATA,
+    contentType: "longform",
+    text: "First article block",
+  });
+  const second = await controller.translateTweet({
+    ...METADATA,
+    contentType: "longform",
+    text: "Second article block",
+  });
+  const repeatedFirst = await controller.translateTweet({
+    ...METADATA,
+    contentType: "longform",
+    text: "First article block",
+  });
+
+  assert.equal(first.translation, "First article block 的译文");
+  assert.equal(second.translation, "Second article block 的译文");
+  assert.equal(repeatedFirst.translation, "First article block 的译文");
+  assert.equal(repeatedFirst.cached, true);
+  assert.deepEqual(providerCalls, ["First article block", "Second article block"]);
+});
+
+test("background preserves every longform cache entry written by concurrent workers", async () => {
+  const { chrome, storage } = createChromeMock({
+    initialStorage: {
+      xatProviderSettings: {
+        tencent: {
+          secretId: "AKIDEXAMPLE",
+          secretKey: "example-secret",
+          region: "ap-guangzhou",
+        },
+      },
+    },
+  });
+  const controller = createBackgroundController(chrome, {
+    now: () => 1710000000000,
+    tencentProviderFactory() {
+      return {
+        id: "tencent",
+        async translate(request) {
+          return { ok: true, translation: `${request.text} translated`, provider: "tencent" };
+        },
+      };
+    },
+  });
+  const sourceTexts = ["Concurrent block A", "Concurrent block B", "Concurrent block C"];
+
+  await Promise.all(sourceTexts.map((text) => controller.translateTweet({
+    ...METADATA,
+    contentType: "longform",
+    text,
+  })));
+
+  const cachedValues = Object.values(storage.xatTranslationCache.translations)
+    .map((entry) => entry.value)
+    .sort();
+  assert.deepEqual(cachedValues, sourceTexts.map((text) => `${text} translated`).sort());
 });
 
 test("background reports unavailable third-party providers for longform without calling X", async () => {

@@ -223,15 +223,19 @@ test("content script observes standalone X Article read views on status pages", 
   await flushMutations();
   await wait(650);
 
-  const message = sentMessages.find((entry) => entry.type === "XAT_TRANSLATE_TWEET");
-  assert.deepEqual(message.payload, {
-    id: "2071337983899271175",
-    url: "https://x.com/0xwhrrari/status/2071337983899271175",
-    contentType: "longform",
-    text: "How I Use Claude Cowork to Run Like a One-Person Company Emails. Reports. Formatting. Most knowledge workers spend time on necessary work.",
-    csrfToken: "csrf-token",
-    dstLang: "zh",
-  });
+  const messages = sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET");
+  assert.deepEqual(messages.map((message) => message.payload.text), [
+    "How I Use Claude Cowork to Run Like a One-Person Company",
+    "Emails. Reports. Formatting.",
+    "Most knowledge workers spend time on necessary work.",
+  ]);
+  for (const message of messages) {
+    assert.equal(message.payload.id, "2071337983899271175");
+    assert.equal(message.payload.url, "https://x.com/0xwhrrari/status/2071337983899271175");
+    assert.equal(message.payload.contentType, "longform");
+    assert.equal(message.payload.csrfToken, "csrf-token");
+    assert.equal(message.payload.dstLang, "zh");
+  }
   dom.window.close();
 });
 
@@ -257,6 +261,7 @@ test("content script reschedules standalone X Article when rich text hydrates af
   observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
   await flushMutations();
   await wait(650);
+  await flushManualArticleWork();
 
   assert.equal(sentMessages.some((entry) => entry.type === "XAT_TRANSLATE_TWEET"), false);
   assert.equal(readView.dataset.xatState, "expanded");
@@ -274,6 +279,7 @@ test("content script reschedules standalone X Article when rich text hydrates af
   );
   await flushMutations();
   await wait(650);
+  await flushManualArticleWork();
 
   const message = sentMessages.find((entry) => entry.type === "XAT_TRANSLATE_TWEET");
   assert.deepEqual(message.payload, {
@@ -284,6 +290,138 @@ test("content script reschedules standalone X Article when rich text hydrates af
     csrfToken: "csrf-token",
     dstLang: "zh",
   });
+  dom.window.close();
+});
+
+test("content script translates newly hydrated X Article text nodes without reprocessing completed nodes", async () => {
+  const { dom, observed, observers, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <div data-contents="true" id="article-contents">
+              <div class="longform-unstyled" data-block="true">
+                <span data-text="true">First hydrated block.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.equal(readView.dataset.xatState, "translated");
+  assert.deepEqual(
+    sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").map((entry) => entry.payload.text),
+    ["First hydrated block."],
+  );
+
+  document.querySelector("#article-contents").insertAdjacentHTML(
+    "beforeend",
+    `
+      <div class="longform-unstyled" data-block="true">
+        <span data-text="true">Second hydrated block.</span>
+      </div>
+    `,
+  );
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.equal(readView.dataset.xatState, "translated");
+  assert.deepEqual(
+    sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").map((entry) => entry.payload.text),
+    ["First hydrated block.", "Second hydrated block."],
+  );
+  assert.equal(document.querySelectorAll("[data-xat-longform-block-translation='1']").length, 2);
+  dom.window.close();
+});
+
+test("content script retranslates a completed longform leaf when X hydrates it in place", async () => {
+  const { dom, observed, observers, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <div data-block="true"><span data-text="true">Initial article text.</span></div>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  const textLeaf = document.querySelector("[data-text='true']");
+  observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.equal(readView.dataset.xatState, "translated");
+  textLeaf.firstChild.data = "Hydrated article text.";
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.deepEqual(
+    sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").map((entry) => entry.payload.text),
+    ["Initial article text.", "Hydrated article text."],
+  );
+  assert.equal(textLeaf.textContent, "内容脚本测试译文");
+  assert.equal(textLeaf.getAttribute("data-xat-original-text"), "Hydrated article text.");
+  assert.equal(readView.dataset.xatState, "translated");
+  dom.window.close();
+});
+
+test("content script retranslates a longform leaf that X replaces as a whole element", async () => {
+  const { dom, observed, observers, sentMessages } = setupDom(
+    "https://x.com/0xwhrrari/status/2071337983899271175",
+    `
+      <main>
+        <div data-testid="twitterArticleRichTextView">
+          <div data-testid="longformRichTextComponent">
+            <div data-block="true"><span data-text="true">Initial replaceable text.</span></div>
+          </div>
+        </div>
+      </main>
+    `,
+  );
+  document.cookie = "ct0=csrf-token";
+
+  await loadContentScript();
+  const readView = document.querySelector("[data-testid='twitterArticleRichTextView']");
+  observers[0].callback([{ isIntersecting: true, target: observed[0] }]);
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  const replacement = document.createElement("span");
+  replacement.setAttribute("data-text", "true");
+  replacement.textContent = "Whole-element replacement text.";
+  document.querySelector("[data-text='true']").replaceWith(replacement);
+  await flushMutations();
+  await wait(650);
+  await flushManualArticleWork();
+
+  assert.deepEqual(
+    sentMessages.filter((entry) => entry.type === "XAT_TRANSLATE_TWEET").map((entry) => entry.payload.text),
+    ["Initial replaceable text.", "Whole-element replacement text."],
+  );
+  assert.equal(replacement.textContent, "内容脚本测试译文");
+  assert.equal(replacement.getAttribute("data-xat-original-text"), "Whole-element replacement text.");
+  assert.equal(readView.dataset.xatState, "translated");
   dom.window.close();
 });
 
@@ -430,9 +568,11 @@ test("manual article translation retries when translated state has no rendered l
     dstLang: "zh",
   });
   assert.equal(
-    document.querySelector("[data-testid='twitterArticleRichTextView']").nextElementSibling?.getAttribute("data-xat-longform-translation"),
+    document.querySelector("[data-text='true']").getAttribute("data-xat-longform-block-translation"),
     "1",
   );
+  assert.equal(document.querySelector("[data-text='true']").textContent, "内容脚本测试译文");
+  assert.equal(document.querySelector("[data-xat-longform-translation]"), null);
   dom.window.close();
 });
 

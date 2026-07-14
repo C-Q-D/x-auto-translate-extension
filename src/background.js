@@ -90,6 +90,23 @@ function normalizeTranslationText(text) {
   return typeof text === "string" ? text.trim() : "";
 }
 
+/**
+ * 为翻译请求生成缓存和并发去重键。
+ * 普通帖子继续按 tweet ID 复用 X 译文；长文必须把目标语言和当前文字节点原文纳入键，避免同一文章的不同节点串用译文。
+ *
+ * @param {{id: string, contentType?: string, dstLang?: string, text?: string}} request 翻译请求元数据和原文。
+ * @returns {string} 可用于内存 Map 和持久化对象的稳定键。
+ * @sideEffects 本函数只规范化字符串，不读写缓存。
+ */
+function createTranslationCacheKey({ id, contentType = "", dstLang = "zh", text = "" }) {
+  if (contentType !== LONGFORM_CONTENT_TYPE) {
+    return id;
+  }
+
+  // 使用完整规范化原文而非短哈希，避免极低概率哈希碰撞把两个内容节点错误映射为同一译文。
+  return [id, contentType, dstLang || "zh", normalizeTranslationText(text)].join("\u001f");
+}
+
 function createAbortController() {
   return typeof AbortController === "function" ? new AbortController() : null;
 }
@@ -190,6 +207,8 @@ export function createBackgroundController(chromeApi, options = {}) {
   const inFlight = new Map();
   const cache = new Map();
   const skipCache = new Map();
+  // 长文工作池会并发返回结果；持久化写入必须串行，避免多个“读取-合并-写回”互相覆盖。
+  let cacheWriteQueue = Promise.resolve();
   const configuredTranslationPipeline = options.translationProviders
     ? createTranslationPipeline(options.translationProviders)
     : null;
@@ -424,36 +443,51 @@ export function createBackgroundController(chromeApi, options = {}) {
     return null;
   }
 
+  /**
+   * 把单次翻译结果合并进持久缓存。
+   * 所有写操作共享串行队列，每次都在前一次写完后读取最新快照，从而保留并发工作线程的全部结果。
+   *
+   * @param {string} id 已包含内容维度的缓存键。
+   * @param {{ok?: boolean, translation?: string, skipped?: boolean, error?: string, provider?: string}} result 翻译结果。
+   * @returns {Promise<void>} 本次缓存写入完成后结束。
+   * @sideEffects 读取并更新 chrome.storage.local 中的翻译缓存。
+   */
   async function writeCachedResult(id, result) {
     if (!chromeApi.storage?.local || !id || !result) {
       return;
     }
 
-    const persistent = await getPersistentCache();
-    const translations = { ...persistent.translations };
-    const skipped = { ...persistent.skipped };
-
-    if (result.ok && result.translation) {
-      translations[id] = {
-        value: result.translation,
-        updatedAt: now(),
-        ...(result.provider ? { provider: result.provider } : {}),
-      };
-      delete skipped[id];
-    } else if (result.skipped) {
-      skipped[id] = { value: result.error || "translation-skipped", updatedAt: now() };
-      delete translations[id];
-    } else {
+    if (!(result.ok && result.translation) && !result.skipped) {
       return;
     }
 
-    await chromeApi.storage.local.set({
-      [CACHE_KEY]: {
-        translations: pruneEntries(translations),
-        skipped: pruneEntries(skipped),
-        updatedAt: new Date().toISOString(),
-      },
+    const writeOperation = cacheWriteQueue.then(async () => {
+      const persistent = await getPersistentCache();
+      const translations = { ...persistent.translations };
+      const skipped = { ...persistent.skipped };
+
+      if (result.ok && result.translation) {
+        translations[id] = {
+          value: result.translation,
+          updatedAt: now(),
+          ...(result.provider ? { provider: result.provider } : {}),
+        };
+        delete skipped[id];
+      } else {
+        skipped[id] = { value: result.error || "translation-skipped", updatedAt: now() };
+        delete translations[id];
+      }
+
+      await chromeApi.storage.local.set({
+        [CACHE_KEY]: {
+          translations: pruneEntries(translations),
+          skipped: pruneEntries(skipped),
+          updatedAt: new Date().toISOString(),
+        },
+      });
     });
+    cacheWriteQueue = writeOperation.catch(() => {});
+    return writeOperation;
   }
 
   async function requestTranslationAttempt({ id, csrfToken, dstLang = "zh", signal }) {
@@ -536,13 +570,14 @@ export function createBackgroundController(chromeApi, options = {}) {
       return { ok: false, error: "invalid-tweet-metadata" };
     }
 
-    const cached = await readCachedResult(id);
+    const cacheKey = createTranslationCacheKey({ id, contentType, dstLang, text });
+    const cached = await readCachedResult(cacheKey);
     if (cached) {
       return cached;
     }
 
-    if (inFlight.has(id)) {
-      return inFlight.get(id);
+    if (inFlight.has(cacheKey)) {
+      return inFlight.get(cacheKey);
     }
 
     const promise = (async () => {
@@ -555,15 +590,15 @@ export function createBackgroundController(chromeApi, options = {}) {
           () => abortController?.abort(),
         );
         if (result?.ok && result.translation) {
-          cache.set(id, {
+          cache.set(cacheKey, {
             value: result.translation,
             updatedAt: now(),
             ...(result.provider ? { provider: result.provider } : {}),
           });
-          await writeCachedResult(id, result);
+          await writeCachedResult(cacheKey, result);
         } else if (result?.skipped) {
-          skipCache.set(id, { value: result?.error || "translation-skipped", updatedAt: now() });
-          await writeCachedResult(id, result);
+          skipCache.set(cacheKey, { value: result?.error || "translation-skipped", updatedAt: now() });
+          await writeCachedResult(cacheKey, result);
           await recordDiagnostic({
             event: "background-translation-skipped",
             id,
@@ -584,11 +619,11 @@ export function createBackgroundController(chromeApi, options = {}) {
         });
         return { ok: false, error: error?.message || "translation-failed" };
       } finally {
-        inFlight.delete(id);
+        inFlight.delete(cacheKey);
       }
     })();
 
-    inFlight.set(id, promise);
+    inFlight.set(cacheKey, promise);
     return promise;
   }
 
@@ -624,7 +659,7 @@ export function createBackgroundController(chromeApi, options = {}) {
 
   function registerMessageListener() {
     chromeApi.storage?.local?.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" })
-      .catch((error) => console.warn("Unable to restrict extension storage access", error));
+      .catch((error) => console.warn("无法限制扩展存储访问范围", error));
 
     chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message?.type === "XAT_DIAGNOSTIC_EVENT") {

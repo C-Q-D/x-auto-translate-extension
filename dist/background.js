@@ -383,6 +383,12 @@
   function normalizeTranslationText(text) {
     return typeof text === "string" ? text.trim() : "";
   }
+  function createTranslationCacheKey({ id, contentType = "", dstLang = "zh", text = "" }) {
+    if (contentType !== LONGFORM_CONTENT_TYPE) {
+      return id;
+    }
+    return [id, contentType, dstLang || "zh", normalizeTranslationText(text)].join("");
+  }
   function createAbortController() {
     return typeof AbortController === "function" ? new AbortController() : null;
   }
@@ -470,6 +476,7 @@
     const inFlight = /* @__PURE__ */ new Map();
     const cache = /* @__PURE__ */ new Map();
     const skipCache = /* @__PURE__ */ new Map();
+    let cacheWriteQueue = Promise.resolve();
     const configuredTranslationPipeline = options.translationProviders ? createTranslationPipeline(options.translationProviders) : null;
     async function getProviderSettings() {
       if (!chromeApi.storage?.local) {
@@ -667,29 +674,35 @@
       if (!chromeApi.storage?.local || !id || !result) {
         return;
       }
-      const persistent = await getPersistentCache();
-      const translations = { ...persistent.translations };
-      const skipped = { ...persistent.skipped };
-      if (result.ok && result.translation) {
-        translations[id] = {
-          value: result.translation,
-          updatedAt: now(),
-          ...result.provider ? { provider: result.provider } : {}
-        };
-        delete skipped[id];
-      } else if (result.skipped) {
-        skipped[id] = { value: result.error || "translation-skipped", updatedAt: now() };
-        delete translations[id];
-      } else {
+      if (!(result.ok && result.translation) && !result.skipped) {
         return;
       }
-      await chromeApi.storage.local.set({
-        [CACHE_KEY]: {
-          translations: pruneEntries(translations),
-          skipped: pruneEntries(skipped),
-          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      const writeOperation = cacheWriteQueue.then(async () => {
+        const persistent = await getPersistentCache();
+        const translations = { ...persistent.translations };
+        const skipped = { ...persistent.skipped };
+        if (result.ok && result.translation) {
+          translations[id] = {
+            value: result.translation,
+            updatedAt: now(),
+            ...result.provider ? { provider: result.provider } : {}
+          };
+          delete skipped[id];
+        } else {
+          skipped[id] = { value: result.error || "translation-skipped", updatedAt: now() };
+          delete translations[id];
         }
+        await chromeApi.storage.local.set({
+          [CACHE_KEY]: {
+            translations: pruneEntries(translations),
+            skipped: pruneEntries(skipped),
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        });
       });
+      cacheWriteQueue = writeOperation.catch(() => {
+      });
+      return writeOperation;
     }
     async function requestTranslationAttempt({ id, csrfToken, dstLang = "zh", signal }) {
       if (signal?.aborted) {
@@ -758,12 +771,13 @@
       if (!id || !urlStatusId || urlStatusId !== id) {
         return { ok: false, error: "invalid-tweet-metadata" };
       }
-      const cached = await readCachedResult(id);
+      const cacheKey = createTranslationCacheKey({ id, contentType, dstLang, text });
+      const cached = await readCachedResult(cacheKey);
       if (cached) {
         return cached;
       }
-      if (inFlight.has(id)) {
-        return inFlight.get(id);
+      if (inFlight.has(cacheKey)) {
+        return inFlight.get(cacheKey);
       }
       const promise = (async () => {
         const abortController = createAbortController();
@@ -775,15 +789,15 @@
             () => abortController?.abort()
           );
           if (result?.ok && result.translation) {
-            cache.set(id, {
+            cache.set(cacheKey, {
               value: result.translation,
               updatedAt: now(),
               ...result.provider ? { provider: result.provider } : {}
             });
-            await writeCachedResult(id, result);
+            await writeCachedResult(cacheKey, result);
           } else if (result?.skipped) {
-            skipCache.set(id, { value: result?.error || "translation-skipped", updatedAt: now() });
-            await writeCachedResult(id, result);
+            skipCache.set(cacheKey, { value: result?.error || "translation-skipped", updatedAt: now() });
+            await writeCachedResult(cacheKey, result);
             await recordDiagnostic({
               event: "background-translation-skipped",
               id
@@ -804,10 +818,10 @@
           });
           return { ok: false, error: error?.message || "translation-failed" };
         } finally {
-          inFlight.delete(id);
+          inFlight.delete(cacheKey);
         }
       })();
-      inFlight.set(id, promise);
+      inFlight.set(cacheKey, promise);
       return promise;
     }
     async function recordDiagnostic(payload = {}) {
@@ -837,7 +851,7 @@
       await chromeApi.storage.local.set({ [STATS_KEY]: next });
     }
     function registerMessageListener() {
-      chromeApi.storage?.local?.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch((error) => console.warn("Unable to restrict extension storage access", error));
+      chromeApi.storage?.local?.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch((error) => console.warn("\u65E0\u6CD5\u9650\u5236\u6269\u5C55\u5B58\u50A8\u8BBF\u95EE\u8303\u56F4", error));
       chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message?.type === "XAT_DIAGNOSTIC_EVENT") {
           recordDiagnostic(message.payload).then(() => sendResponse({ ok: true }));
