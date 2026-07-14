@@ -555,6 +555,28 @@ test("background routes longform text directly to configured third-party provide
   assert.equal(storage.xatTranslationCache.translations[TWEET_ID].provider, "tencent");
 });
 
+test("background reports unavailable third-party providers for longform without calling X", async () => {
+  const { chrome, storage } = createChromeMock();
+  const { fetchApi, calls: fetchCalls } = createFetchMock({
+    responses: [createFetchResponse(200, { result: { text: "不应调用 X 接口" } })],
+  });
+  const controller = createBackgroundController(chrome, {
+    fetch: fetchApi,
+    now: () => 1710000000000,
+  });
+
+  const result = await controller.translateTweet({
+    ...METADATA,
+    contentType: "longform",
+    text: "Longform title and body",
+  });
+
+  assert.deepEqual(result, { ok: false, error: "third-party-provider-unavailable" });
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(storage.xatStats.failed, 1);
+  assert.equal(storage.xatStats.lastError, "third-party-provider-unavailable");
+});
+
 test("background preserves the X rate-limit error when Tencent is not configured", async () => {
   const { chrome } = createChromeMock();
   const { fetchApi, calls: fetchCalls } = createFetchMock({
